@@ -1,7 +1,7 @@
 import bpy, bmesh, math, os
 from mathutils import Vector
 
-print("=== FLAT HEX PLATES — WALLS ===")
+print("=== FLAT HEX PLATES — WALLS + INNER SENSOR PLATFORM ===")
 print("=" * 60)
 
 # ---- CONFIGURABLE PARAMETERS --------------------
@@ -21,6 +21,16 @@ GAP_BETWEEN_PLATES = INVISIBLE_TILE_GAP * TILE_SPACING
 # ---- WALL PARAMETERS --------------------
 WALL_WIDTH = 6.0    # extra width beyond PERIMETER_THICKNESS -> total offset from hex edge = PERIMETER_THICKNESS + WALL_WIDTH
 WALL_HEIGHT = 26.0  # extrusion in Z+, starting at the top of the plate (z = PLATE_H)
+
+# ---- INNER SENSOR TILE PARAMETERS --------------------
+INNER_TILE_WIDTH = 78.0   # flat-to-flat width of the raised sensor platform —
+                            # the space each sensor hexagon occupies
+INNER_TILE_HEIGHT = 5.0   # ADJUST if needed — height wasn't respecified, this
+                            # matches the earlier version's value
+# Isolated per-tile platform, same center as its base hex tile. Since tile
+# centers are spaced HEX_FLAT_WIDTH (84mm) apart and this platform is only
+# 78mm wide, neighboring platforms are 84-78 = 6mm apart at their closest
+# edges -- that's the gap for the vibration-damping textile/rug strip.
 
 # ---- WIRE HOLE CONFIGURATION --------------------
 WIRE_HOLE_DIAMETER = 12.0
@@ -49,6 +59,9 @@ print(f"")
 print(f"Perimeter contour: {PERIMETER_THICKNESS:.1f}mm")
 print(f"Wall: {WALL_WIDTH:.1f}mm wide (total offset from hex edge: {PERIMETER_THICKNESS + WALL_WIDTH:.1f}mm), "
       f"{WALL_HEIGHT:.1f}mm tall (z={PLATE_H:.1f}..{PLATE_H + WALL_HEIGHT:.1f}mm)")
+print(f"Inner sensor tile: {INNER_TILE_WIDTH:.1f}mm wide, {INNER_TILE_HEIGHT:.1f}mm tall "
+      f"(z={PLATE_H:.1f}..{PLATE_H + INNER_TILE_HEIGHT:.1f}mm), "
+      f"{HEX_FLAT_WIDTH - INNER_TILE_WIDTH:.1f}mm gap between neighboring platforms")
 print(f"Gap between plates: {GAP_BETWEEN_PLATES:.1f}mm")
 print("=" * 60)
 
@@ -149,18 +162,7 @@ def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0):
     confirmed root cause of every previous attempt: two different tiles
     independently scaling "the same" shared vertex outward from their own
     separate centers land at two DIFFERENT points. Here there is only ever
-    one answer per point, by construction.
-
-    Each tile's own corners are listed counter-clockwise (increasing
-    angle), so its exterior edges are already consistently oriented CCW
-    around the union's outer boundary — shared/interior edges appear
-    once in each direction (once per neighboring tile) and cancel out via
-    the edge_count check, leaving only a single consistent directed trace
-    of the true outer boundary. For each vertex on that trace, the offset
-    point is the standard 2D miter of its incoming and outgoing boundary
-    edges' outward normals (clamped so a very sharp reflex angle can't
-    project a spike out to a far-away point — it falls back to a shorter,
-    averaged direction instead)."""
+    one answer per point, by construction."""
     tile_corner_lists = [get_hex_corners(cx, cy, HEX_FLAT_WIDTH) for (cx, cy) in grid_tiles]
 
     edge_count = {}
@@ -179,10 +181,6 @@ def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0):
         for i in range(6):
             j = (i + 1) % 6
             p0, p1 = corners[i], corners[j]
-            # Classify against the FULL (unsplit) grid, not this plate's own
-            # local edge_count — a gap-facing edge (interior in the full
-            # grid, exterior only because its neighbor tile is on the OTHER
-            # plate) must not get the perimeter/wall boundary treatment.
             p0_full = (p0[0] - shift_x, p0[1])
             p1_full = (p1[0] - shift_x, p1[1])
             fek = tuple(sorted([_vkey(p0_full), _vkey(p1_full)]))
@@ -220,9 +218,6 @@ def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0):
             miter_len = offset_distance / cos_half
             offset_map[v] = (v[0] + mx * miter_len, v[1] + my * miter_len)
         else:
-            # Branch/pinch point (rare here) or a dangling end: average
-            # whatever incident boundary-edge normals exist. Still a
-            # single shared answer for this vertex, just less precise.
             fallback_verts.append((v, len(ins), len(outs)))
             normals = [outward_normal(a, v) for a in ins] + [outward_normal(v, b) for b in outs]
             if normals:
@@ -244,33 +239,10 @@ def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0):
     return offset_map, dangling_verts
 
 def build_plate_body(grid_tiles, solid_name, shift_x=0.0):
-    """Builds the flat hex tiles, the PERIMETER_THICKNESS contour, and the
-    WALL_WIDTH wall directly via bmesh face construction, using a shared
-    boundary offset computed ONCE per vertex (see compute_boundary_offset_map)
-    instead of per tile.
-
-    Earlier attempts all failed for reasons now understood:
-      1. A hand-rolled per-tile-edge offset computed each tile's own
-         corners independently, so two different tiles' versions of "the
-         same" shared vertex landed at two different points at basically
-         every tile-to-tile boundary -> overlapping/gapped slivers, and
-         the perimeter ridge itself made hexagons look mismatched.
-      2 & 3. bmesh.ops.inset_region and bpy.ops.mesh.inset (Edit Mode)
-         were both tried to offset the boundary in one consistent pass —
-         inset_region silently added zero geometry with no exception;
-         bpy.ops.mesh.inset reported {'FINISHED'} while also adding zero
-         faces, then {'CANCELLED'} on the second call. Neither behaved as
-         documented in this environment, for reasons that never surfaced
-         in the logs.
-
-    This version has no dependency on either: the offset geometry (top,
-    bottom, inner/outer walls of both the perimeter ring and the wall
-    ring) is built directly from compute_boundary_offset_map's shared
-    per-vertex dictionary, so any two edges meeting at the same boundary
-    vertex — regardless of which tile they came from — always resolve to
-    the exact same offset point and therefore share the exact same mesh
-    vertex (via the gv() dedup below). No corner-stitching logic is
-    needed at all; the shared vertices make every join automatic."""
+    """Builds the flat hex tiles, the PERIMETER_THICKNESS contour, the
+    WALL_WIDTH wall, and the raised inner sensor platform, via bmesh face
+    construction, using a shared boundary offset computed ONCE per vertex
+    (see compute_boundary_offset_map) instead of per tile."""
     print(f"\nBuilding {solid_name} with {len(grid_tiles)} tiles")
 
     mesh = bpy.data.meshes.new(solid_name+"_mesh")
@@ -300,15 +272,56 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0):
     perim_offset, dangling_verts = compute_boundary_offset_map(grid_tiles, PERIMETER_THICKNESS, shift_x)
     wall_outer_offset, _ = compute_boundary_offset_map(grid_tiles, PERIMETER_THICKNESS + WALL_WIDTH, shift_x)
 
-    # Tile top (Z1) and bottom (Z0, reversed) faces.
+    # Tile top (Z1): only the RING between the 84mm outer boundary and the
+    # 78mm platform boundary — not a solid hex. A solid top face here would
+    # sit exactly coincident with the platform's own bottom face (built
+    # below) across the platform's entire footprint, since both are at the
+    # same z1 height. That duplicate, overlapping geometry is what was
+    # actually breaking almost every wire-hole cut — the holes sit at
+    # radius 28mm, well inside the 78mm platform's 39mm apothem, so every
+    # cut had to pass straight through this overlap. Bottom (Z0) stays a
+    # solid hex — nothing else occupies that level, so no overlap there.
     for (cx, cy) in grid_tiles:
         corners = tile_corners[(cx, cy)]
-        top = [gv(x, y, z1) for x, y in corners]
-        try: bm.faces.new(top)
-        except ValueError: pass
+        inner_platform_corners = get_hex_corners(cx, cy, INNER_TILE_WIDTH)
+        outer_top = [gv(x, y, z1) for x, y in corners]
+        inner_top = [gv(x, y, z1) for x, y in inner_platform_corners]
+        for i in range(6):
+            j = (i + 1) % 6
+            try: bm.faces.new([outer_top[i], outer_top[j], inner_top[j], inner_top[i]])
+            except ValueError: pass
         bot = [gv(x, y, z0) for x, y in corners]
         try: bm.faces.new(list(reversed(bot)))
         except ValueError: pass
+
+    # ---- Inner sensor platform ------------------------------------------
+    # A separate, isolated INNER_TILE_WIDTH (78mm) hex prism per tile,
+    # sitting on top of the base plate (z1 to z1+INNER_TILE_HEIGHT), same
+    # center as the base tile. It's smaller than the 84mm base hex and
+    # deliberately doesn't touch its neighbors — that 84-78=6mm gap is
+    # where the vibration-damping rug/textile goes — so it's built as its
+    # own small watertight prism, independent of the boundary/wall logic.
+    z_inner = z1 + INNER_TILE_HEIGHT
+    platform_count = 0
+    for (cx, cy) in grid_tiles:
+        inner_corners = get_hex_corners(cx, cy, INNER_TILE_WIDTH)
+        itop = [gv(x, y, z_inner) for x, y in inner_corners]
+        try: bm.faces.new(itop)
+        except ValueError as e: print(f"  ⚠ inner top FAILED at ({cx:.1f},{cy:.1f}): {e}")
+        ibot = [gv(x, y, z1) for x, y in inner_corners]
+        try: bm.faces.new(list(reversed(ibot)))
+        except ValueError as e: print(f"  ⚠ inner bottom FAILED at ({cx:.1f},{cy:.1f}): {e}")
+        for i in range(6):
+            j = (i + 1) % 6
+            ib0 = gv(inner_corners[i][0], inner_corners[i][1], z1)
+            ib1 = gv(inner_corners[j][0], inner_corners[j][1], z1)
+            it0 = gv(inner_corners[i][0], inner_corners[i][1], z_inner)
+            it1 = gv(inner_corners[j][0], inner_corners[j][1], z_inner)
+            try: bm.faces.new([ib0, ib1, it1, it0])
+            except ValueError as e: print(f"  ⚠ inner side FAILED at ({cx:.1f},{cy:.1f}) edge {i}: {e}")
+        platform_count += 1
+    print(f"  Built {platform_count} inner sensor platforms "
+          f"({INNER_TILE_WIDTH:.1f}mm wide, z={z1:.1f}..{z_inner:.1f}mm)")
 
     exterior_edge_count = 0
     for (cx, cy) in grid_tiles:
@@ -319,12 +332,7 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0):
 
             ek = tuple(sorted([_vkey(p0), _vkey(p1)]))
             if edge_count[ek] != 1:
-                continue  # interior edge, shared with a neighbor tile — no
-                          # side wall needed here: the tile-top/tile-bottom
-                          # faces on both sides already meet flush, and
-                          # adding a redundant vertical wall at this flat
-                          # boundary (as an earlier version did, on every
-                          # edge) makes it a 3- or 4-face non-manifold edge.
+                continue  # interior edge, shared with a neighbor tile
             exterior_edge_count += 1
 
             b0 = gv(p0[0], p0[1], z0); b1 = gv(p1[0], p1[1], z0)
@@ -334,11 +342,6 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0):
             p1_full = (p1[0] - shift_x, p1[1])
             fek = tuple(sorted([_vkey(p0_full), _vkey(p1_full)]))
             if FULL_EDGE_COUNT.get(fek, 0) != 1:
-                # Gap-facing: this edge is interior in the full, unsplit
-                # grid — its neighbor tile is real, just on the OTHER
-                # plate. No perimeter/wall bulge here, just a plain flat
-                # closing wall, so the two plates' contours read as two
-                # halves of one continuous shape across the gap.
                 try: bm.faces.new([b0, b1, t1, t0])
                 except ValueError: pass
                 continue
@@ -353,43 +356,19 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0):
             wt0 = gv(wo0[0], wo0[1], z2); wt1 = gv(wo1[0], wo1[1], z2)
             pt0_z2 = gv(po0[0], po0[1], z2); pt1_z2 = gv(po1[0], po1[1], z2)
 
-            # Perimeter top/bottom (thin lip, same 2mm height as the tile).
             try: bm.faces.new([t0, t1, pt1, pt0])
             except ValueError: pass
             try: bm.faces.new([b0, b1, pb1, pb0])
             except ValueError: pass
-
-            # Wall: its footprint (perim_offset to wall_outer) now spans the
-            # FULL Z0..Z2 height, overlapping the plate/perimeter's Z0..Z1
-            # range rather than merely touching it at Z1. That overlap is
-            # what makes this one continuous solid instead of two blocks
-            # meeting only along a single edge (which is exactly what made
-            # every boundary segment non-manifold before: the plate/
-            # perimeter's outer wall, the wall's own flat bottom ledge, and
-            # the wall's inner wall all converged on that one shared edge —
-            # 3 faces on one edge instead of 2). Now the Z0..Z1 portion of
-            # the perim_offset boundary is fully internal (solid tile on
-            # one side, solid wall on the other) and needs no face at all;
-            # only the wall's inner face for Z1..Z2 (bordering the open
-            # cavity above the plate) is exposed.
-            try: bm.faces.new([pt0, pt1, pt1_z2, pt0_z2])   # wall inner wall (Z1..Z2 only)
+            try: bm.faces.new([pt0, pt1, pt1_z2, pt0_z2])
             except ValueError: pass
-            try: bm.faces.new([wo0_z0, wo1_z0, wt1, wt0])   # wall outer wall (Z0..Z2, full)
+            try: bm.faces.new([wo0_z0, wo1_z0, wt1, wt0])
             except ValueError: pass
-            try: bm.faces.new([pt0_z2, pt1_z2, wt1, wt0])   # wall top cap (Z2)
+            try: bm.faces.new([pt0_z2, pt1_z2, wt1, wt0])
             except ValueError: pass
-            try: bm.faces.new([pb0, pb1, wo1_z0, wo0_z0])   # wall bottom cap (Z0)
+            try: bm.faces.new([pb0, pb1, wo1_z0, wo0_z0])
             except ValueError: pass
 
-    # End caps: wherever the perimeter/wall ring's boundary trace has an
-    # open end — a "true exterior" edge butting up against a gap-facing
-    # edge — the ring stops abruptly without being closed off. Cap it with
-    # one planar 7-vertex face spanning from the raw tile corner out to
-    # the wall's outer edge and back; it's planar because perim_offset and
-    # wall_outer_offset are both along the exact same miter direction from
-    # this vertex, just different distances, and the raw-corner-to-raw-
-    # corner edge closing the loop is already covered by the adjacent
-    # gap-facing flat wall quad sharing that same edge.
     end_caps_added = 0
     for v in dangling_verts:
         po = perim_offset[v]
@@ -408,13 +387,17 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0):
     bm.to_mesh(mesh)
     bm.free()
     mesh.validate()
+    mesh.update()   # forces the viewport's draw/tessellation buffers to
+                      # actually refresh — without this, low-level bmesh
+                      # writes can leave stale render data even though the
+                      # underlying vertex/polygon arrays are already correct
+                      # (which is exactly what the console/Python-check
+                      # mismatch pointed to)
 
     nm, za = report_manifold_stats(obj)
     print(f"  {solid_name}: {exterior_edge_count} true exterior edges, "
-          f"{end_caps_added} end caps, "
-          f"{nm} non-manifold edges, {za} zero-area faces after "
-          f"perimeter+wall construction "
-          f"(z=0..{PLATE_H:.1f}mm plate, {PLATE_H:.1f}..{PLATE_H+WALL_HEIGHT:.1f}mm wall)")
+          f"{end_caps_added} end caps, {platform_count} inner platforms, "
+          f"{nm} non-manifold edges, {za} zero-area faces")
     return obj
 
 def make_wire_hole_cutter(name, cx, cy):
@@ -494,6 +477,23 @@ def do_diff(target, cutter, solver='EXACT'):
         except: pass
         return False
 
+def cutter_leaked_into_result(cutter, result_obj):
+    """True if any of the cutter's own vertex positions survive
+    unchanged in the result — a sign the boolean fused the cutter's
+    shell in rather than actually subtracting it. A genuine subtraction
+    always creates a NEW intersection boundary between the two shapes;
+    it should never reproduce one input's exact, unmodified surface.
+    This is what catches the case safe_cut's manifold-delta check
+    alone could miss: a boolean that reports success and comes back
+    fully manifold-clean, but never actually carved the hole — the
+    cutter's own geometry just got fused in as leftover material."""
+    cutter_positions = {(round(v.co.x,3), round(v.co.y,3), round(v.co.z,3))
+                         for v in cutter.data.vertices}
+    result_positions = {(round(v.co.x,3), round(v.co.y,3), round(v.co.z,3))
+                         for v in result_obj.data.vertices}
+    leaked = cutter_positions & result_positions
+    return len(leaked) > 0, len(leaked)
+
 def try_cut_on_copy(target, cutter, solver):
     nm0, za0 = report_manifold_stats(target)
     dup = duplicate_obj(target, target.name + "_TRY")
@@ -502,6 +502,14 @@ def try_cut_on_copy(target, cutter, solver):
         bpy.data.objects.remove(dup, do_unlink=True)
         return False, None, None, None
     nm1, za1 = report_manifold_stats(dup)
+    leaked, leak_count = cutter_leaked_into_result(cutter, dup)
+    if leaked:
+        print(f"      {solver}: boolean reported success but {leak_count} cutter "
+              f"vertices leaked into the result — treating as failed")
+        # Force a bad score so safe_cut's comparison will always prefer
+        # the alternative solver (or report outright failure) instead of
+        # silently accepting a cut that didn't actually remove material.
+        nm1 = nm0 + 1000
     print(f"      {solver}: non-manifold edges: {nm1-nm0}, zero-area faces: {za1-za0}")
     return True, nm1 - nm0, za1 - za0, dup
 
@@ -572,6 +580,16 @@ def build_side(grid_tiles, half_char, solid_name, shift_x=0.0):
 left_obj = build_side(left_grid, 'L', "SensorBase_L", shift_x=0.0)
 right_obj = build_side(right_grid, 'R', "SensorBase_R", shift_x=GAP_BETWEEN_PLATES)
 
+# Force a full dependency-graph/viewport refresh — belt-and-suspenders
+# alongside the per-mesh mesh.update() calls above, in case the viewport
+# was still showing stale draw data for any other reason.
+left_obj.data.update()
+right_obj.data.update()
+bpy.context.view_layer.update()
+for area in bpy.context.screen.areas:
+    if area.type == 'VIEW_3D':
+        area.tag_redraw()
+
 # ---- Export -------------------------
 blend_path = bpy.data.filepath
 export_dir = os.path.dirname(blend_path) if blend_path else os.path.expanduser("~")
@@ -603,6 +621,8 @@ print(f"Tile size: {HEX_FLAT_WIDTH:.1f}mm flat-to-flat")
 print(f"Perimeter thickness: {PERIMETER_THICKNESS:.1f}mm")
 print(f"Wall: {WALL_WIDTH:.1f}mm wide (total offset from hex edge: {PERIMETER_THICKNESS + WALL_WIDTH:.1f}mm), "
       f"{WALL_HEIGHT:.1f}mm tall")
+print(f"Inner sensor tile: {INNER_TILE_WIDTH:.1f}mm wide, {INNER_TILE_HEIGHT:.1f}mm tall, "
+      f"{HEX_FLAT_WIDTH - INNER_TILE_WIDTH:.1f}mm gap between neighbors")
 print(f"Invisible tile gap: {INVISIBLE_TILE_GAP:.1f} tiles = {GAP_BETWEEN_PLATES:.1f}mm")
 print(f"Wire hole diameter: {WIRE_HOLE_DIAMETER:.1f}mm")
 print("="*60)
