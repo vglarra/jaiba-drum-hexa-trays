@@ -36,17 +36,39 @@ WALL_HEIGHT = 26.0
 # anywhere near the 78mm sensor platform). Built as the LAST step in the
 # whole script, after every existing rod hole and canal — so those all
 # run against completely unchanged geometry, exactly as before.
-RAIL_TOTAL_FROM_TIP = 25.0   # per spec
+RAIL_TOTAL_FROM_TIP = 15.0   # rail depth reduced (was 25). With
+                              # _EXISTING_WALL_FROM_TIP=9 and
+                              # RAIL_UNION_OVERLAP=2, the rail box's inner
+                              # face is at tip+7, so the box itself is now
+                              # only 15-7=8mm deep -- barely wider than
+                              # the 7mm rod.
 RAIL_UNION_OVERLAP = 2.0     # mm reaching into the existing wall's own
                                # thickness, just for a safe union — not
                                # a deep fill, nowhere near the platform
-RAIL_ROD_OFFSET_FROM_OUTER = 5.0   # rod sits this far IN from the rail's
-                                     # true outer edge — "close to the
-                                     # outer edge, not the tip side," per
-                                     # your correction. (Needs >=3.5mm
-                                     # clearance for the 7mm rod itself;
-                                     # 5mm leaves ~1.5mm margin to the
-                                     # outer face — tight, verify visually.)
+RAIL_ROD_OFFSET_FROM_OUTER = 4.3   # rod sits this far IN from the rail's
+                                    # true outer edge -- i.e. close to the
+                                    # INNER face (tip+7), the seam where
+                                    # the rail intersects the existing
+                                    # wall coming off the hex tip, per your
+                                    # ask. With the box now only 8mm deep,
+                                    # "fully inside both faces" only
+                                    # spans offset 3.5-4.5mm at all -- 4.3
+                                    # leaves ~0.2mm to the inner face and
+                                    # ~0.8mm to the outer face. That's as
+                                    # close to the tip-side intersection
+                                    # as the rod can get without actually
+                                    # touching either face; there is very
+                                    # little room to spare at this depth.
+RAIL_ROD_Z = (PLATE_H + WALL_HEIGHT) - 10.0   # the rail's own rod moves up
+                                                # toward the TOP of the rail
+                                                # (Z+) instead of sharing the
+                                                # base plate's rod Z (5mm) --
+                                                # both TopRail and BottomRail
+                                                # rod centers sit 10mm below
+                                                # the rail's top surface
+                                                # (Z=PLATE_H+WALL_HEIGHT),
+                                                # leaving ~6.5mm margin to
+                                                # that top face.
 
 # ---- INNER SENSOR TILE PARAMETERS --------------------
 INNER_TILE_WIDTH = 78.0
@@ -606,46 +628,57 @@ def cutter_leaked_into_result(cutter, result_obj):
     return len(leaked) > 0, len(leaked)
 
 def try_cut_on_copy(target, cutter, solver):
+    """Returns (ok, delta_nm, delta_za, dup, abs_nm, abs_za) -- the delta
+    is relative to `target`'s own state going in, but abs_nm/abs_za are
+    the FINAL non-manifold/zero-area counts on the result itself. A
+    delta of 0 only means this particular operation didn't make things
+    WORSE than whatever `target` already was -- it says nothing about
+    whether `target` was already broken. safe_cut below picks/reports
+    based on the absolute counts for that reason."""
     nm0, za0 = report_manifold_stats(target)
     dup = duplicate_obj(target, target.name + "_TRY")
     ok = do_diff(dup, cutter, solver=solver)
     if not ok:
         bpy.data.objects.remove(dup, do_unlink=True)
-        return False, None, None, None
+        return False, None, None, None, None, None
     nm1, za1 = report_manifold_stats(dup)
     leaked, leak_count = cutter_leaked_into_result(cutter, dup)
     if leaked:
         print(f"      {solver}: boolean reported success but {leak_count} cutter "
               f"vertices leaked into the result — treating as failed")
         nm1 = nm0 + 1000
-    print(f"      {solver}: non-manifold edges: {nm1-nm0}, zero-area faces: {za1-za0}")
-    return True, nm1 - nm0, za1 - za0, dup
+    print(f"      {solver}: non-manifold edges: {nm1-nm0} (total now {nm1}), "
+          f"zero-area faces: {za1-za0} (total now {za1})")
+    return True, nm1 - nm0, za1 - za0, dup, nm1, za1
 
 def safe_cut(label, target, cutter, primary='EXACT'):
     print(f"    Cutting {label}...")
     alt = 'FLOAT' if primary == 'EXACT' else 'EXACT'
-    ok1, dn1, dz1, dup1 = try_cut_on_copy(target, cutter, primary)
-    if ok1 and dn1 == 0 and dz1 == 0:
+    ok1, _, _, dup1, nm1, za1 = try_cut_on_copy(target, cutter, primary)
+    if ok1 and nm1 == 0 and za1 == 0:
         target.data = dup1.data
         bpy.data.objects.remove(dup1, do_unlink=True)
         print(f"    ✓ {label} cut cleanly with {primary}")
         return True
-    ok2, dn2, dz2, dup2 = try_cut_on_copy(target, cutter, alt)
+    ok2, _, _, dup2, nm2, za2 = try_cut_on_copy(target, cutter, alt)
     candidates = []
-    if ok1: candidates.append((dn1 + dz1, primary, dup1))
-    if ok2: candidates.append((dn2 + dz2, alt, dup2))
+    if ok1: candidates.append((nm1 + za1, primary, dup1, nm1, za1))
+    if ok2: candidates.append((nm2 + za2, alt, dup2, nm2, za2))
     if not candidates:
         print(f"    ⚠ {label}: both solvers failed — material NOT removed")
         return False
     candidates.sort(key=lambda c: c[0])
-    best_score, best_solver, best_dup = candidates[0]
+    best_score, best_solver, best_dup, best_nm, best_za = candidates[0]
     target.data = best_dup.data
-    for _, _, d in candidates:
+    for _, _, d, _, _ in candidates:
         if d is not best_dup:
             bpy.data.objects.remove(d, do_unlink=True)
     bpy.data.objects.remove(best_dup, do_unlink=True)
     if best_score > 0:
-        print(f"    ⚠ {label}: cleanest available ({best_solver}) still has {best_score} issue(s)")
+        print(f"    ⚠ {label}: cleanest available ({best_solver}) still has "
+              f"{best_nm} non-manifold edges, {best_za} zero-area faces")
+    else:
+        print(f"    ✓ {label} cut cleanly with {best_solver}")
     return True
 
 def make_box_solid(name, x0, x1, y0, y1, z0, z1):
@@ -663,6 +696,10 @@ def make_box_solid(name, x0, x1, y0, y1, z0, z1):
 def safe_union(label, target, addition, primary='EXACT'):
     print(f"    Unioning {label}...")
     def try_union(solver):
+        """Same distinction as try_cut_on_copy: the delta only says
+        whether THIS union made things worse, not whether the result is
+        actually clean -- returns the absolute final counts too, which
+        is what safe_union below picks/reports on."""
         nm0, za0 = report_manifold_stats(target)
         dup = duplicate_obj(target, target.name + "_TRYU")
         bpy.ops.object.select_all(action='DESELECT')
@@ -676,34 +713,38 @@ def safe_union(label, target, addition, primary='EXACT'):
             try: dup.modifiers.remove(mod)
             except: pass
             bpy.data.objects.remove(dup, do_unlink=True)
-            return False, None, None, None
+            return False, None, None, None, None, None
         nm1, za1 = report_manifold_stats(dup)
-        print(f"      {solver}: non-manifold edges: {nm1-nm0}, zero-area faces: {za1-za0}")
-        return True, nm1 - nm0, za1 - za0, dup
+        print(f"      {solver}: non-manifold edges: {nm1-nm0} (total now {nm1}), "
+              f"zero-area faces: {za1-za0} (total now {za1})")
+        return True, nm1 - nm0, za1 - za0, dup, nm1, za1
 
-    ok1, dn1, dz1, dup1 = try_union(primary)
+    ok1, _, _, dup1, nm1, za1 = try_union(primary)
     alt = 'FLOAT' if primary == 'EXACT' else 'EXACT'
-    if ok1 and dn1 == 0 and dz1 == 0:
+    if ok1 and nm1 == 0 and za1 == 0:
         target.data = dup1.data
         bpy.data.objects.remove(dup1, do_unlink=True)
         print(f"    ✓ {label} unioned cleanly with {primary}")
         return True
-    ok2, dn2, dz2, dup2 = try_union(alt)
+    ok2, _, _, dup2, nm2, za2 = try_union(alt)
     candidates = []
-    if ok1: candidates.append((dn1 + dz1, primary, dup1))
-    if ok2: candidates.append((dn2 + dz2, alt, dup2))
+    if ok1: candidates.append((nm1 + za1, primary, dup1, nm1, za1))
+    if ok2: candidates.append((nm2 + za2, alt, dup2, nm2, za2))
     if not candidates:
         print(f"    ⚠ {label}: both solvers failed — rail NOT attached")
         return False
     candidates.sort(key=lambda c: c[0])
-    best_score, best_solver, best_dup = candidates[0]
+    best_score, best_solver, best_dup, best_nm, best_za = candidates[0]
     target.data = best_dup.data
-    for _, _, d in candidates:
+    for _, _, d, _, _ in candidates:
         if d is not best_dup:
             bpy.data.objects.remove(d, do_unlink=True)
     bpy.data.objects.remove(best_dup, do_unlink=True)
     if best_score > 0:
-        print(f"    ⚠ {label}: cleanest available ({best_solver}) still has {best_score} issue(s)")
+        print(f"    ⚠ {label}: cleanest available ({best_solver}) still has "
+              f"{best_nm} non-manifold edges, {best_za} zero-area faces")
+    else:
+        print(f"    ✓ {label} unioned cleanly with {best_solver}")
     return True
 
 def add_tile_label(label, cx, cy):
@@ -914,8 +955,8 @@ RAIL_ROD_ROWS = [
     ("X_BottomRail", RAIL_ROD_Y_BOTTOM - ROW_SPLIT_MARGIN, [bl_obj, br_obj]),
 ]
 for label, rod_y, objs in RAIL_ROD_ROWS:
-    print(f"\n  Rod hole {label} (Y={rod_y:.3f}, Z={ROD_HOLE_Z_X_AXIS:.1f})...")
-    cutter = make_rod_hole_cutter(f"Hole_Rod_{label}", rod_y, ROD_HOLE_Z_X_AXIS)
+    print(f"\n  Rod hole {label} (Y={rod_y:.3f}, Z={RAIL_ROD_Z:.1f})...")
+    cutter = make_rod_hole_cutter(f"Hole_Rod_{label}", rod_y, RAIL_ROD_Z)
     apply_transforms(cutter)
     for obj in objs:
         safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
