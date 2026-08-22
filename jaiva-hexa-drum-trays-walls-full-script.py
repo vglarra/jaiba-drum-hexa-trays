@@ -75,6 +75,29 @@ ROD_HOLE_Y_OFFSET_L04_R06 = -20.0   # X_L04-R06, moved 35mm towards Y- from
                                      # +-15mm holes elsewhere. Verify visually
                                      # before printing.
 
+# The Y-axis rods (below) run along the same columns the X-axis rods
+# cross through -- e.g. the X_L02-R04 rod passes straight through L03,
+# which is also exactly on the Y_L00-L01-L06 column -- so at Z=PLATE_H/2
+# both axes would try to occupy the same point. Split them onto the two
+# quarter-points of PLATE_H instead (an "even division": 5, 10, 15),
+# leaving the center (10mm) unused -- that puts both rods 5mm off-center
+# and 10mm apart from each other, with ~1.5mm of material left above/
+# below each hole to the nearest face.
+ROD_HOLE_Z_X_AXIS = PLATE_H / 4.0        # 5.0mm
+ROD_HOLE_Z_Y_AXIS = 3.0 * PLATE_H / 4.0  # 15.0mm
+
+# Y-axis rod columns: X_LEFT/X_RIGHT are the local (pre-shift) column
+# positions -- they land exactly on L03/L06 and R03/R08 (both sit at
+# +-HEX_FLAT_WIDTH from center, same as +-H once the derived geometry
+# below is computed) and on the depression between L00/L01 and R00/R01
+# (their midpoint is also +-HEX_FLAT_WIDTH), so the whole column is
+# continuously solid top to bottom. Checked against every tile's wire
+# hole (at tile_cx-28, same Y as the tile center) in that column -- the
+# closest is 14mm away, well clear of the 9.5mm (6mm wire radius + 3.5mm
+# rod radius) minimum needed.
+ROD_HOLE_X_LEFT = -HEX_FLAT_WIDTH
+ROD_HOLE_X_RIGHT = HEX_FLAT_WIDTH  # + GAP_BETWEEN_PLATES applied where it's used
+
 # ---- Direction mapping --------------------
 DIRECTION_NAMES = {
     0: "Right", 60: "Upper-Right", 120: "Upper-Left",
@@ -573,6 +596,39 @@ def make_rod_hole_cutter(name, y_center, z_center, length=2000.0):
     obj.location=Vector((0.0, y_center, z_center))
     return obj
 
+def make_rod_hole_cutter_y(name, x_center, z_center, length=2000.0):
+    """Vertical-column threaded-rod hole, axis-aligned along Y, radius
+    ROD_HOLE_RADIUS -- same construction as make_rod_hole_cutter, just
+    with X and Y swapped."""
+    print(f"    Rod hole at X={x_center:.3f}, Z={z_center:.3f} (⌀{ROD_HOLE_DIAMETER:.1f}mm, along Y)")
+
+    mesh=bpy.data.meshes.new(name+"_mesh")
+    obj=bpy.data.objects.new(name,mesh)
+    bpy.context.collection.objects.link(obj)
+    bm=bmesh.new()
+    segs=32
+    half=length/2.0
+    bv,tv=[],[]
+
+    for i in range(segs):
+        a=2*math.pi*i/segs
+        xo=ROD_HOLE_RADIUS*math.cos(a)
+        zo=ROD_HOLE_RADIUS*math.sin(a)
+        bv.append(bm.verts.new((xo,-half,zo)))
+        tv.append(bm.verts.new((xo,half,zo)))
+
+    for i in range(segs):
+        j=(i+1)%segs
+        bm.faces.new([bv[i],bv[j],tv[j],tv[i]])
+    bm.faces.new(list(reversed(bv)))
+    bm.faces.new(tv)
+    bm.normal_update()
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.validate()
+    obj.location=Vector((x_center, 0.0, z_center))
+    return obj
+
 def apply_transforms(obj):
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
@@ -735,8 +791,28 @@ ROD_HOLE_ROWS = [
     ("X_L04-R06", y1, ROD_HOLE_Y_OFFSET_L04_R06, [bl_obj, br_obj]),
 ]
 for label, row_cy, y_offset, objs in ROD_HOLE_ROWS:
-    print(f"\n  Rod hole {label} (row Y={row_cy:.3f}, hole Y={row_cy + y_offset:.3f})...")
-    cutter = make_rod_hole_cutter(f"Hole_Rod_{label}", row_cy + y_offset, PLATE_H / 2.0)
+    print(f"\n  Rod hole {label} (row Y={row_cy:.3f}, hole Y={row_cy + y_offset:.3f}, Z={ROD_HOLE_Z_X_AXIS:.1f})...")
+    cutter = make_rod_hole_cutter(f"Hole_Rod_{label}", row_cy + y_offset, ROD_HOLE_Z_X_AXIS)
+    apply_transforms(cutter)
+    for obj in objs:
+        safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
+    bpy.data.objects.remove(cutter, do_unlink=True)
+
+# ---- Y-axis threaded-rod holes (unite the 4 quadrants, other axis) ----
+# One hole per column that straddles the row-split boundary, spanning
+# the full column so a single rod passes through both quadrants on that
+# side once assembled. Z offset (ROD_HOLE_Z_Y_AXIS) keeps these clear of
+# the X-axis rods above -- see the comment above ROD_HOLE_Z_X_AXIS.
+print(f"\n{'='*60}")
+print("Drilling Y-axis threaded-rod holes")
+print(f"{'='*60}")
+ROD_HOLE_COLUMNS = [
+    ("Y_L00-L01_L06", ROD_HOLE_X_LEFT, [tl_obj, bl_obj]),
+    ("Y_R00-R01_R08", ROD_HOLE_X_RIGHT + GAP_BETWEEN_PLATES, [tr_obj, br_obj]),
+]
+for label, col_x, objs in ROD_HOLE_COLUMNS:
+    print(f"\n  Rod hole {label} (column X={col_x:.3f}, Z={ROD_HOLE_Z_Y_AXIS:.1f})...")
+    cutter = make_rod_hole_cutter_y(f"Hole_Rod_{label}", col_x, ROD_HOLE_Z_Y_AXIS)
     apply_transforms(cutter)
     for obj in objs:
         safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
