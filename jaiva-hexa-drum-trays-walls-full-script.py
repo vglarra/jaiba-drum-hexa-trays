@@ -7,7 +7,7 @@ print("=" * 60)
 # ---- CONFIGURABLE PARAMETERS --------------------
 HEX_FLAT_WIDTH = 84.0
 HOLE_RADIUS = 28.0
-PLATE_H = 2.0
+PLATE_H = 20.0
 
 # ---- PERIMETER CONTOUR PARAMETERS --------------------
 PERIMETER_THICKNESS = 3.0
@@ -49,6 +49,31 @@ INNER_TILE_HEIGHT = 5.0   # ADJUST if needed — height wasn't respecified, this
 WIRE_HOLE_DIAMETER = 12.0
 WIRE_HOLE_RADIUS = WIRE_HOLE_DIAMETER / 2.0
 WIRE_HOLE_ANGLE = 180
+
+# ---- THREADED ROD HOLES (unite the 4 quadrant plates) --------------------
+# Horizontal holes through the now-thick (PLATE_H=20mm) base slab so
+# threaded rods can clamp the quadrants together. The wire holes sit
+# exactly on each row's centerline (same Y as the tile center, at
+# WIRE_HOLE_ANGLE=180 i.e. HOLE_RADIUS to the west) and go through the
+# FULL part height, so a rod hole can't dodge them in Z -- it has to be
+# offset in Y instead. This hex's flat (non-tapering) vertical edges run
+# +-S*sin(30) = +-24.2mm off each row's centerline, so ROD_HOLE_Y_OFFSET
+# just needs to clear WIRE_HOLE_RADIUS (6mm) while staying inside that
+# band -- 15mm leaves ~5.5mm clearance from the wire holes and ~5.7mm
+# clearance from where the hex starts tapering.
+ROD_HOLE_DIAMETER = 7.0
+ROD_HOLE_RADIUS = ROD_HOLE_DIAMETER / 2.0
+ROD_HOLE_Y_OFFSET = 15.0            # X_L02-R04 (unchanged)
+ROD_HOLE_Y_OFFSET_L04_R06 = -20.0   # X_L04-R06, moved 35mm towards Y- from
+                                     # the +15 position -- puts it on the
+                                     # other side of the row centerline
+                                     # from the wire holes, with ~10.5mm
+                                     # clearance from them. NOTE: this only
+                                     # leaves ~0.75mm clearance to where the
+                                     # hex stops being flat-sided (band is
+                                     # +-24.2mm) -- much tighter than the
+                                     # +-15mm holes elsewhere. Verify visually
+                                     # before printing.
 
 # ---- Direction mapping --------------------
 DIRECTION_NAMES = {
@@ -512,6 +537,42 @@ def make_wire_hole_cutter(name, cx, cy):
     obj.location=Vector((hx, hy, center_z))
     return obj
 
+def make_rod_hole_cutter(name, y_center, z_center, length=2000.0):
+    """Horizontal threaded-rod hole, axis-aligned along X, radius
+    ROD_HOLE_RADIUS. `length` just needs to comfortably outrun the row of
+    tiles it's cutting -- the boolean only removes material where the
+    cylinder actually overlaps a given quadrant's mesh, so the same long
+    cutter can be reused against multiple quadrant objects and any part
+    of it past the real geometry is simply a no-op there."""
+    print(f"    Rod hole at Y={y_center:.3f}, Z={z_center:.3f} (⌀{ROD_HOLE_DIAMETER:.1f}mm, along X)")
+
+    mesh=bpy.data.meshes.new(name+"_mesh")
+    obj=bpy.data.objects.new(name,mesh)
+    bpy.context.collection.objects.link(obj)
+    bm=bmesh.new()
+    segs=32
+    half=length/2.0
+    bv,tv=[],[]
+
+    for i in range(segs):
+        a=2*math.pi*i/segs
+        yo=ROD_HOLE_RADIUS*math.cos(a)
+        zo=ROD_HOLE_RADIUS*math.sin(a)
+        bv.append(bm.verts.new((-half,yo,zo)))
+        tv.append(bm.verts.new((half,yo,zo)))
+
+    for i in range(segs):
+        j=(i+1)%segs
+        bm.faces.new([bv[i],bv[j],tv[j],tv[i]])
+    bm.faces.new(list(reversed(bv)))
+    bm.faces.new(tv)
+    bm.normal_update()
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.validate()
+    obj.location=Vector((0.0, y_center, z_center))
+    return obj
+
 def apply_transforms(obj):
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
@@ -660,6 +721,26 @@ bl_obj = build_side(bl_tiles, "SensorBase_BL", shift_x=0.0, shift_y=-ROW_SPLIT_M
 br_obj = build_side(br_tiles, "SensorBase_BR", shift_x=GAP_BETWEEN_PLATES, shift_y=-ROW_SPLIT_MARGIN)
 
 quadrant_objs = [tl_obj, tr_obj, bl_obj, br_obj]
+
+# ---- X-axis threaded-rod holes (unite the 4 quadrants) ----
+# One hole per row that straddles the row-split boundary, spanning the
+# full row so a single rod passes through both quadrants on that side
+# once assembled. Y/Z offset chosen to clear the vertical wire holes --
+# see the ROD_HOLE_* comment above.
+print(f"\n{'='*60}")
+print("Drilling X-axis threaded-rod holes")
+print(f"{'='*60}")
+ROD_HOLE_ROWS = [
+    ("X_L02-R04", y2, ROD_HOLE_Y_OFFSET, [tl_obj, tr_obj]),
+    ("X_L04-R06", y1, ROD_HOLE_Y_OFFSET_L04_R06, [bl_obj, br_obj]),
+]
+for label, row_cy, y_offset, objs in ROD_HOLE_ROWS:
+    print(f"\n  Rod hole {label} (row Y={row_cy:.3f}, hole Y={row_cy + y_offset:.3f})...")
+    cutter = make_rod_hole_cutter(f"Hole_Rod_{label}", row_cy + y_offset, PLATE_H / 2.0)
+    apply_transforms(cutter)
+    for obj in objs:
+        safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
+    bpy.data.objects.remove(cutter, do_unlink=True)
 
 # Force a full dependency-graph/viewport refresh — belt-and-suspenders
 # alongside the per-mesh mesh.update() calls above, in case the viewport
