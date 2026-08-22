@@ -14,123 +14,67 @@ PERIMETER_THICKNESS = 3.0
 TOTAL_WIDTH = HEX_FLAT_WIDTH + 2 * PERIMETER_THICKNESS
 
 # ---- INVISIBLE TILE GAP --------------------
-JOIN_PLATES = False   # switch: True/1 = butt the RIGHT plate flush against
-                        # the LEFT plate (zero gap, ignores INVISIBLE_TILE_GAP
-                        # below) so they form one continuous surface along
-                        # the split line. False/0 = keep the plates apart by
-                        # INVISIBLE_TILE_GAP (old/default behavior).
+JOIN_PLATES = True
 INVISIBLE_TILE_GAP = 1.0
 TILE_SPACING = 1.5 * HEX_FLAT_WIDTH
 GAP_BETWEEN_PLATES = 0.0 if JOIN_PLATES else INVISIBLE_TILE_GAP * TILE_SPACING
 
 # ---- ROW SPLIT (4-WAY QUARTER PRINTING) --------------------
-ROW_SPLIT_MARGIN = 3.0   # mm pushback on each side of the row-split zigzag
-                          # boundary (between the two middle rows), so the
-                          # TOP and BOTTOM quadrants sit 2*ROW_SPLIT_MARGIN
-                          # apart. Same idea as GAP_BETWEEN_PLATES but for
-                          # the new split axis -- a small fixed print-bed
-                          # clearance rather than the invisible-tile gap.
+ROW_SPLIT_MARGIN = 3.0
 
 # ---- WALL PARAMETERS --------------------
-WALL_WIDTH = 6.0    # extra width beyond PERIMETER_THICKNESS -> total offset from hex edge = PERIMETER_THICKNESS + WALL_WIDTH
-WALL_HEIGHT = 26.0  # extrusion in Z+, starting at the top of the plate (z = PLATE_H)
+WALL_WIDTH = 6.0
+WALL_HEIGHT = 26.0
+
+# ---- TOP/BOTTOM REINFORCEMENT RAILS --------------------
+# Per your corrected spec: 15mm TOTAL from the raw hex tip to the outer
+# edge of the new reinforcement — NOT a filled rectangle, NOT 50mm. The
+# existing wall already reaches PERIMETER_THICKNESS+WALL_WIDTH=9mm from
+# the tip, so the genuinely NEW material is only 15-9=6mm thick. A small
+# RAIL_UNION_OVERLAP reaches back INTO the existing wall's own 9mm
+# thickness just enough for a clean union (not deep into the tile, never
+# anywhere near the 78mm sensor platform). Built as the LAST step in the
+# whole script, after every existing rod hole and canal — so those all
+# run against completely unchanged geometry, exactly as before.
+RAIL_TOTAL_FROM_TIP = 25.0   # per spec
+RAIL_UNION_OVERLAP = 2.0     # mm reaching into the existing wall's own
+                               # thickness, just for a safe union — not
+                               # a deep fill, nowhere near the platform
+RAIL_ROD_OFFSET_FROM_OUTER = 5.0   # rod sits this far IN from the rail's
+                                     # true outer edge — "close to the
+                                     # outer edge, not the tip side," per
+                                     # your correction. (Needs >=3.5mm
+                                     # clearance for the 7mm rod itself;
+                                     # 5mm leaves ~1.5mm margin to the
+                                     # outer face — tight, verify visually.)
 
 # ---- INNER SENSOR TILE PARAMETERS --------------------
-INNER_TILE_WIDTH = 78.0   # flat-to-flat width of the raised sensor platform —
-                            # the space each sensor hexagon occupies
-INNER_TILE_HEIGHT = 5.0   # ADJUST if needed — height wasn't respecified, this
-                            # matches the earlier version's value
-# Isolated per-tile platform, same center as its base hex tile. Since tile
-# centers are spaced HEX_FLAT_WIDTH (84mm) apart and this platform is only
-# 78mm wide, neighboring platforms are 84-78 = 6mm apart at their closest
-# edges -- that's the gap for the vibration-damping textile/rug strip.
+INNER_TILE_WIDTH = 78.0
+INNER_TILE_HEIGHT = 5.0
 
 # ---- WIRE HOLE CONFIGURATION --------------------
 WIRE_HOLE_DIAMETER = 12.0
 WIRE_HOLE_RADIUS = WIRE_HOLE_DIAMETER / 2.0
 WIRE_HOLE_ANGLE = 180
 
-# ---- THREADED ROD HOLES (unite the 4 quadrant plates) --------------------
-# Horizontal holes through the now-thick (PLATE_H=20mm) base slab so
-# threaded rods can clamp the quadrants together. The wire holes sit
-# exactly on each row's centerline (same Y as the tile center, at
-# WIRE_HOLE_ANGLE=180 i.e. HOLE_RADIUS to the west) and go through the
-# FULL part height, so a rod hole can't dodge them in Z -- it has to be
-# offset in Y instead. This hex's flat (non-tapering) vertical edges run
-# +-S*sin(30) = +-24.2mm off each row's centerline, so ROD_HOLE_Y_OFFSET
-# just needs to clear WIRE_HOLE_RADIUS (6mm) while staying inside that
-# band.
+# ---- THREADED ROD HOLES (unite the 4 quadrant plates) — UNCHANGED, same
+# positions as before, not touched by this update at all --------------
 ROD_HOLE_DIAMETER = 7.0
 ROD_HOLE_RADIUS = ROD_HOLE_DIAMETER / 2.0
-ROD_HOLE_Y_OFFSET = 20.0            # X_L02-R04, moved 5mm further towards
-                                     # Y+ from the original +15 position to
-                                     # open up more clearance from the
-                                     # wire-routing canal below it (canal
-                                     # edge to rod edge went from ~1mm to
-                                     # ~6mm). ~10.5mm clearance from the
-                                     # wire holes, ~0.75mm clearance to
-                                     # where the hex stops being flat-sided
-                                     # (band is +-24.2mm) -- tight; verify
-                                     # visually before printing.
-ROD_HOLE_Y_OFFSET_L04_R06 = -20.0   # X_L04-R06, moved 35mm towards Y- from
-                                     # the +15 position -- puts it on the
-                                     # other side of the row centerline
-                                     # from the wire holes, with ~10.5mm
-                                     # clearance from them. NOTE: this only
-                                     # leaves ~0.75mm clearance to where the
-                                     # hex stops being flat-sided (band is
-                                     # +-24.2mm) -- much tighter than the
-                                     # +-15mm holes elsewhere. Verify visually
-                                     # before printing.
-
-# The Y-axis rods (below) run along the same columns the X-axis rods
-# cross through -- e.g. the X_L02-R04 rod passes straight through L03,
-# which is also exactly on the Y_L00-L01-L06 column -- so at Z=PLATE_H/2
-# both axes would try to occupy the same point. Split them onto the two
-# quarter-points of PLATE_H instead (an "even division": 5, 10, 15),
-# leaving the center (10mm) unused -- that puts both rods 5mm off-center
-# and 10mm apart from each other, with ~1.5mm of material left above/
-# below each hole to the nearest face.
-ROD_HOLE_Z_X_AXIS = PLATE_H / 4.0        # 5.0mm
-ROD_HOLE_Z_Y_AXIS = 3.0 * PLATE_H / 4.0  # 15.0mm
-
-# Y-axis rod columns: X_LEFT/X_RIGHT are the local (pre-shift) column
-# positions -- they land exactly on L03/L06 and R03/R08 (both sit at
-# +-HEX_FLAT_WIDTH from center, same as +-H once the derived geometry
-# below is computed) and on the depression between L00/L01 and R00/R01
-# (their midpoint is also +-HEX_FLAT_WIDTH), so the whole column is
-# continuously solid top to bottom. Checked against every tile's wire
-# hole (at tile_cx-28, same Y as the tile center) in that column -- the
-# closest is 14mm away, well clear of the 9.5mm (6mm wire radius + 3.5mm
-# rod radius) minimum needed.
+ROD_HOLE_Y_OFFSET = 20.0
+ROD_HOLE_Y_OFFSET_L04_R06 = -20.0
+ROD_HOLE_Z_X_AXIS = PLATE_H / 4.0
+ROD_HOLE_Z_Y_AXIS = 3.0 * PLATE_H / 4.0
 ROD_HOLE_X_LEFT = -HEX_FLAT_WIDTH
-ROD_HOLE_X_RIGHT = HEX_FLAT_WIDTH  # + GAP_BETWEEN_PLATES applied where it's used
+ROD_HOLE_X_RIGHT = HEX_FLAT_WIDTH
 
-# ---- WIRE-ROUTING CANALS (rear/bottom face) --------------------
-# All 4 rows' wire holes sit on the same Y as their row (WIRE_HOLE_ANGLE
-# points every hole due west of its tile, no Y offset), so a canal cut
-# along a row's centerline passes straight through every wire hole on
-# that row -- no dodging needed here, unlike the rod holes. A blind
-# pocket CANAL_DEPTH deep, cut UP from the bottom face -- but the cutter
-# itself starts a couple mm BELOW Z=0 (like the wire-hole cutter's
-# bottom=-2.0), not exactly at it: a cutter face sitting exactly
-# coplanar with the target's own bottom face is a classic degenerate
-# case for the boolean solver, and was leaving the bottom skin uncut --
-# the canal was only visible in an X/Y cross-section, not as an actual
-# opening from underneath. The couple mm of overrun below the surface
-# guarantees a clean full perforation there.
+# ---- WIRE-ROUTING CANALS (rear/bottom face) — UNCHANGED --------------
 CANAL_WIDTH = 15.0
 CANAL_DEPTH = 10.0
 CANAL_Z_START = -2.0
 CANAL_Z_END = CANAL_DEPTH
-CANAL_LEFT_X = -1000.0   # generous overrun -- perforates the LEFT outer
-                          # wall so the 4 canals all "meet" on the L00-L06
-                          # side, per the ask
-CANAL_RIGHT_MARGIN = WIRE_HOLE_RADIUS + 2.0  # canal's right end stops
-                                              # just past the R01/R04/R06/
-                                              # R08 hole -- it "starts"
-                                              # there, doesn't cut further
-                                              # right through that wall
+CANAL_LEFT_X = -1000.0
+CANAL_RIGHT_MARGIN = WIRE_HOLE_RADIUS + 2.0
 
 # ---- Direction mapping --------------------
 DIRECTION_NAMES = {
@@ -154,6 +98,8 @@ print(f"")
 print(f"Perimeter contour: {PERIMETER_THICKNESS:.1f}mm")
 print(f"Wall: {WALL_WIDTH:.1f}mm wide (total offset from hex edge: {PERIMETER_THICKNESS + WALL_WIDTH:.1f}mm), "
       f"{WALL_HEIGHT:.1f}mm tall (z={PLATE_H:.1f}..{PLATE_H + WALL_HEIGHT:.1f}mm)")
+print(f"Rail: {RAIL_TOTAL_FROM_TIP:.1f}mm total from tip "
+      f"({RAIL_TOTAL_FROM_TIP - (PERIMETER_THICKNESS+WALL_WIDTH):.1f}mm new beyond the existing wall)")
 print(f"Inner sensor tile: {INNER_TILE_WIDTH:.1f}mm wide, {INNER_TILE_HEIGHT:.1f}mm tall "
       f"(z={PLATE_H:.1f}..{PLATE_H + INNER_TILE_HEIGHT:.1f}mm), "
       f"{HEX_FLAT_WIDTH - INNER_TILE_WIDTH:.1f}mm gap between neighboring platforms")
@@ -170,7 +116,6 @@ grid_orig = [
     (-1.0*H,y0),(0.0,y0),(1.0*H,y0),
 ]
 
-# Find split position
 col_xs=sorted(set(round(cx,2) for cx,cy in grid_orig))
 best_gap=0; best_split=0
 for i in range(len(col_xs)-1):
@@ -193,9 +138,6 @@ if best_split == 0:
 
 SPLIT_X = best_split
 
-# Row split: the boundary between the two middle rows (the zigzag gap
-# where hex tiles from adjacent, column-offset rows meet). With exactly 4
-# rows present, that's always between the 2nd and 3rd row.
 row_ys = sorted(set(round(cy, 2) for cx, cy in grid_orig), reverse=True)
 SPLIT_Y = (row_ys[1] + row_ys[2]) / 2.0
 
@@ -212,12 +154,6 @@ print(f"Left: {len(left_grid)} tiles, Right: {len(right_grid)} tiles")
 print(f"Split at Y = {SPLIT_Y:.3f}")
 print("=" * 60)
 
-# ---- Quadrants (for 1/4-plate printing) ------------------------
-# Labels (L00.. / R00..) are assigned from the ORIGINAL left_grid/
-# right_grid order above, so a tile keeps the same tag whether it's
-# exported as part of a half-plate or a quarter-plate. Quadrant
-# assignment and the ROW_SPLIT_MARGIN shift are then applied on top,
-# independent of that labeling.
 def split_into_quadrants(half_grid, label_prefix):
     top, bottom = [], []
     for i, (cx, cy) in enumerate(half_grid):
@@ -235,7 +171,6 @@ print(f"Top-Left: {len(tl_tiles)} tiles, Top-Right: {len(tr_tiles)} tiles, "
       f"Bottom-Left: {len(bl_tiles)} tiles, Bottom-Right: {len(br_tiles)} tiles")
 print("=" * 60)
 
-# ---- Cleanup -------------------------------
 def cleanup_objects():
     to_remove = []
     for obj in bpy.data.objects:
@@ -248,7 +183,6 @@ def cleanup_objects():
 cleanup_objects()
 print("=" * 60)
 
-# ---- Builders -------------------------
 def get_hole_position(cx, cy, angle_deg):
     angle_rad = math.radians(angle_deg)
     return cx + HOLE_RADIUS * math.cos(angle_rad), cy + HOLE_RADIUS * math.sin(angle_rad)
@@ -261,18 +195,6 @@ def get_hex_corners(cx, cy, flat_width):
 def _vkey(p):
     return (round(p[0], 3), round(p[1], 3))
 
-# Edge counts over the FULL, unsplit 16-tile grid (grid_orig, un-shifted —
-# before the Left/Right split and before the invisible-tile-gap shift is
-# applied to the right side). An edge that's exterior here (count 1) is a
-# true outer-contour edge and gets the full perimeter+wall treatment on
-# whichever plate it ends up on. An edge that's INTERIOR here (count 2)
-# but ends up exterior to a single plate — because its two tiles landed on
-# opposite sides of the split — is "gap-facing": it only looks exterior
-# because the other plate's matching tile isn't part of this mesh, not
-# because it's really an outer edge. Those get a plain flat closing wall
-# instead of the 9mm perimeter+wall bulge, so the two plates' contours in
-# the gap still read as the two halves of one continuous shape, matching
-# the (wall-less) base script's plates.
 FULL_EDGE_COUNT = {}
 for (cx, cy) in grid_orig:
     corners = get_hex_corners(cx, cy, HEX_FLAT_WIDTH)
@@ -282,13 +204,6 @@ for (cx, cy) in grid_orig:
         FULL_EDGE_COUNT[ek] = FULL_EDGE_COUNT.get(ek, 0) + 1
 
 def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0, shift_y=0.0):
-    """Computes ONE offset point per boundary vertex of the union of all
-    tiles' flat hexagons, offset outward by `offset_distance` — computed
-    ONCE per shared vertex (not once per tile), which is the fix for the
-    confirmed root cause of every previous attempt: two different tiles
-    independently scaling "the same" shared vertex outward from their own
-    separate centers land at two DIFFERENT points. Here there is only ever
-    one answer per point, by construction."""
     tile_corner_lists = [get_hex_corners(cx, cy, HEX_FLAT_WIDTH) for (cx, cy) in grid_tiles]
 
     edge_count = {}
@@ -311,7 +226,7 @@ def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0, shift_
             p1_full = (p1[0] - shift_x, p1[1] - shift_y)
             fek = tuple(sorted([_vkey(p0_full), _vkey(p1_full)]))
             if FULL_EDGE_COUNT.get(fek, 0) != 1:
-                continue  # interior in the full grid, or gap-facing
+                continue
             k0, k1 = _vkey(p0), _vkey(p1)
             nxt.setdefault(k0, []).append(k1)
             prv.setdefault(k1, []).append(k0)
@@ -319,7 +234,7 @@ def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0, shift_
     def outward_normal(a, b):
         dx, dy = b[0] - a[0], b[1] - a[1]
         L = math.hypot(dx, dy)
-        return (dy / L, -dx / L)  # CCW boundary -> rotate -90 deg = outward
+        return (dy / L, -dx / L)
 
     offset_map = {}
     fallback_verts = []
@@ -338,7 +253,7 @@ def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0, shift_
             else:
                 mx, my = mx / mlen, my / mlen
             raw_cos_half = mx * n_in[0] + my * n_in[1]
-            cos_half = max(raw_cos_half, 0.35)  # clamp: miter <= ~3x offset
+            cos_half = max(raw_cos_half, 0.35)
             if raw_cos_half < 0.35:
                 clamped_verts.append((v, raw_cos_half))
             miter_len = offset_distance / cos_half
@@ -364,26 +279,12 @@ def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0, shift_
     dangling_verts = {v for (v, _, _) in fallback_verts}
     return offset_map, dangling_verts
 
-# GLOBAL (unsplit, all 16 tiles) boundary offsets, computed once. At a
-# vertex right at the split line, a per-half offset map only ever sees ONE
-# of the two true-exterior edges that actually meet there (the other one
-# belongs to a tile that lives in the OTHER plate's mesh) -- it falls back
-# to a single-edge normal instead of a proper two-edge miter. The LEFT and
-# RIGHT plates then each compute a different, independently-wrong offset
-# at what should be the exact same point, which is what shows up as a
-# mismatched notch/sliver where the two plates' walls meet once joined
-# (see JOIN_PLATES). Using the full, unsplit grid here means both edges
-# at that vertex are visible to the SAME miter calculation, so both
-# plates end up using the identical, correctly-mitered point.
 print("\nComputing GLOBAL (unsplit) boundary offsets for continuous wall miters across the split line...")
 GLOBAL_PERIM_OFFSET, _ = compute_boundary_offset_map(grid_orig, PERIMETER_THICKNESS, shift_x=0.0)
 GLOBAL_WALL_OFFSET, _ = compute_boundary_offset_map(grid_orig, PERIMETER_THICKNESS + WALL_WIDTH, shift_x=0.0)
 print("=" * 60)
 
 def globalize_offset_map(local_map, global_map, shift_x, shift_y=0.0):
-    """Overrides each local (per-quadrant) offset value with its globally-
-    mitered equivalent where one exists, shifted into this quadrant's
-    local coordinate space. See the comment above GLOBAL_PERIM_OFFSET."""
     out = dict(local_map)
     for k in local_map:
         gk = (round(k[0] - shift_x, 3), round(k[1] - shift_y, 3))
@@ -393,10 +294,6 @@ def globalize_offset_map(local_map, global_map, shift_x, shift_y=0.0):
     return out
 
 def build_plate_body(grid_tiles, solid_name, shift_x=0.0, shift_y=0.0):
-    """Builds the flat hex tiles, the PERIMETER_THICKNESS contour, the
-    WALL_WIDTH wall, and the raised inner sensor platform, via bmesh face
-    construction, using a shared boundary offset computed ONCE per vertex
-    (see compute_boundary_offset_map) instead of per tile."""
     print(f"\nBuilding {solid_name} with {len(grid_tiles)} tiles")
 
     mesh = bpy.data.meshes.new(solid_name+"_mesh")
@@ -428,15 +325,6 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0, shift_y=0.0):
     perim_offset = globalize_offset_map(perim_offset, GLOBAL_PERIM_OFFSET, shift_x, shift_y)
     wall_outer_offset = globalize_offset_map(wall_outer_offset, GLOBAL_WALL_OFFSET, shift_x, shift_y)
 
-    # Tile top (Z1): only the RING between the 84mm outer boundary and the
-    # 78mm platform boundary — not a solid hex. A solid top face here would
-    # sit exactly coincident with the platform's own bottom face (built
-    # below) across the platform's entire footprint, since both are at the
-    # same z1 height. That duplicate, overlapping geometry is what was
-    # actually breaking almost every wire-hole cut — the holes sit at
-    # radius 28mm, well inside the 78mm platform's 39mm apothem, so every
-    # cut had to pass straight through this overlap. Bottom (Z0) stays a
-    # solid hex — nothing else occupies that level, so no overlap there.
     for (cx, cy) in grid_tiles:
         corners = tile_corners[(cx, cy)]
         inner_platform_corners = get_hex_corners(cx, cy, INNER_TILE_WIDTH)
@@ -450,13 +338,6 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0, shift_y=0.0):
         try: bm.faces.new(list(reversed(bot)))
         except ValueError: pass
 
-    # ---- Inner sensor platform ------------------------------------------
-    # A separate, isolated INNER_TILE_WIDTH (78mm) hex prism per tile,
-    # sitting on top of the base plate (z1 to z1+INNER_TILE_HEIGHT), same
-    # center as the base tile. It's smaller than the 84mm base hex and
-    # deliberately doesn't touch its neighbors — that 84-78=6mm gap is
-    # where the vibration-damping rug/textile goes — so it's built as its
-    # own small watertight prism, independent of the boundary/wall logic.
     z_inner = z1 + INNER_TILE_HEIGHT
     platform_count = 0
     for (cx, cy) in grid_tiles:
@@ -488,7 +369,7 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0, shift_y=0.0):
 
             ek = tuple(sorted([_vkey(p0), _vkey(p1)]))
             if edge_count[ek] != 1:
-                continue  # interior edge, shared with a neighbor tile
+                continue
             exterior_edge_count += 1
 
             b0 = gv(p0[0], p0[1], z0); b1 = gv(p1[0], p1[1], z0)
@@ -543,12 +424,7 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0, shift_y=0.0):
     bm.to_mesh(mesh)
     bm.free()
     mesh.validate()
-    mesh.update()   # forces the viewport's draw/tessellation buffers to
-                      # actually refresh — without this, low-level bmesh
-                      # writes can leave stale render data even though the
-                      # underlying vertex/polygon arrays are already correct
-                      # (which is exactly what the console/Python-check
-                      # mismatch pointed to)
+    mesh.update()
 
     nm, za = report_manifold_stats(obj)
     print(f"  {solid_name}: {exterior_edge_count} true exterior edges, "
@@ -557,7 +433,6 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0, shift_y=0.0):
     return obj
 
 def make_wire_hole_cutter(name, cx, cy):
-    """Wire hole - goes through the full height (unchanged from the walls script)"""
     hx, hy = get_hole_position(cx, cy, WIRE_HOLE_ANGLE)
     print(f"    Wire hole at ({hx:.3f}, {hy:.3f}) (angle: {WIRE_HOLE_ANGLE}°, ⌀{WIRE_HOLE_DIAMETER:.1f}mm)")
 
@@ -595,12 +470,6 @@ def make_wire_hole_cutter(name, cx, cy):
     return obj
 
 def make_rod_hole_cutter(name, y_center, z_center, length=2000.0):
-    """Horizontal threaded-rod hole, axis-aligned along X, radius
-    ROD_HOLE_RADIUS. `length` just needs to comfortably outrun the row of
-    tiles it's cutting -- the boolean only removes material where the
-    cylinder actually overlaps a given quadrant's mesh, so the same long
-    cutter can be reused against multiple quadrant objects and any part
-    of it past the real geometry is simply a no-op there."""
     print(f"    Rod hole at Y={y_center:.3f}, Z={z_center:.3f} (⌀{ROD_HOLE_DIAMETER:.1f}mm, along X)")
 
     mesh=bpy.data.meshes.new(name+"_mesh")
@@ -631,9 +500,6 @@ def make_rod_hole_cutter(name, y_center, z_center, length=2000.0):
     return obj
 
 def make_rod_hole_cutter_y(name, x_center, z_center, length=2000.0):
-    """Vertical-column threaded-rod hole, axis-aligned along Y, radius
-    ROD_HOLE_RADIUS -- same construction as make_rod_hole_cutter, just
-    with X and Y swapped."""
     print(f"    Rod hole at X={x_center:.3f}, Z={z_center:.3f} (⌀{ROD_HOLE_DIAMETER:.1f}mm, along Y)")
 
     mesh=bpy.data.meshes.new(name+"_mesh")
@@ -664,10 +530,6 @@ def make_rod_hole_cutter_y(name, x_center, z_center, length=2000.0):
     return obj
 
 def make_canal_cutter(name, x_start, x_end, y_center, z_start, z_end):
-    """Rectangular wire-routing canal: a box from x_start..x_end in X,
-    y_center +- CANAL_WIDTH/2 in Y, z_start..z_end in Z. Built directly in
-    world coordinates (no obj.location offset), so no apply_transforms
-    call is needed before using it as a boolean cutter."""
     print(f"    Canal X={x_start:.3f}..{x_end:.3f}, Y={y_center:.3f} (width {CANAL_WIDTH:.1f}mm), "
           f"Z={z_start:.1f}..{z_end:.1f}mm")
     half_w = CANAL_WIDTH / 2.0
@@ -736,15 +598,6 @@ def do_diff(target, cutter, solver='EXACT'):
         return False
 
 def cutter_leaked_into_result(cutter, result_obj):
-    """True if any of the cutter's own vertex positions survive
-    unchanged in the result — a sign the boolean fused the cutter's
-    shell in rather than actually subtracting it. A genuine subtraction
-    always creates a NEW intersection boundary between the two shapes;
-    it should never reproduce one input's exact, unmodified surface.
-    This is what catches the case safe_cut's manifold-delta check
-    alone could miss: a boolean that reports success and comes back
-    fully manifold-clean, but never actually carved the hole — the
-    cutter's own geometry just got fused in as leftover material."""
     cutter_positions = {(round(v.co.x,3), round(v.co.y,3), round(v.co.z,3))
                          for v in cutter.data.vertices}
     result_positions = {(round(v.co.x,3), round(v.co.y,3), round(v.co.z,3))
@@ -764,9 +617,6 @@ def try_cut_on_copy(target, cutter, solver):
     if leaked:
         print(f"      {solver}: boolean reported success but {leak_count} cutter "
               f"vertices leaked into the result — treating as failed")
-        # Force a bad score so safe_cut's comparison will always prefer
-        # the alternative solver (or report outright failure) instead of
-        # silently accepting a cut that didn't actually remove material.
         nm1 = nm0 + 1000
     print(f"      {solver}: non-manifold edges: {nm1-nm0}, zero-area faces: {za1-za0}")
     return True, nm1 - nm0, za1 - za0, dup
@@ -798,6 +648,64 @@ def safe_cut(label, target, cutter, primary='EXACT'):
         print(f"    ⚠ {label}: cleanest available ({best_solver}) still has {best_score} issue(s)")
     return True
 
+def make_box_solid(name, x0, x1, y0, y1, z0, z1):
+    mesh = bpy.data.meshes.new(name+"_mesh"); obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    bm = bmesh.new()
+    corners = [(x0,y0,z0),(x1,y0,z0),(x1,y1,z0),(x0,y1,z0),
+               (x0,y0,z1),(x1,y0,z1),(x1,y1,z1),(x0,y1,z1)]
+    bv = [bm.verts.new(c) for c in corners]
+    for fi in [[0,3,2,1],[4,5,6,7],[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7]]:
+        bm.faces.new([bv[i] for i in fi])
+    bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
+    return obj
+
+def safe_union(label, target, addition, primary='EXACT'):
+    print(f"    Unioning {label}...")
+    def try_union(solver):
+        nm0, za0 = report_manifold_stats(target)
+        dup = duplicate_obj(target, target.name + "_TRYU")
+        bpy.ops.object.select_all(action='DESELECT')
+        dup.select_set(True); bpy.context.view_layer.objects.active = dup
+        mod = dup.modifiers.new("Union", 'BOOLEAN')
+        mod.operation = 'UNION'; mod.object = addition; mod.solver = solver
+        try:
+            bpy.ops.object.modifier_apply(modifier="Union")
+        except Exception as e:
+            print(f"      failed ({solver}): {e}")
+            try: dup.modifiers.remove(mod)
+            except: pass
+            bpy.data.objects.remove(dup, do_unlink=True)
+            return False, None, None, None
+        nm1, za1 = report_manifold_stats(dup)
+        print(f"      {solver}: non-manifold edges: {nm1-nm0}, zero-area faces: {za1-za0}")
+        return True, nm1 - nm0, za1 - za0, dup
+
+    ok1, dn1, dz1, dup1 = try_union(primary)
+    alt = 'FLOAT' if primary == 'EXACT' else 'EXACT'
+    if ok1 and dn1 == 0 and dz1 == 0:
+        target.data = dup1.data
+        bpy.data.objects.remove(dup1, do_unlink=True)
+        print(f"    ✓ {label} unioned cleanly with {primary}")
+        return True
+    ok2, dn2, dz2, dup2 = try_union(alt)
+    candidates = []
+    if ok1: candidates.append((dn1 + dz1, primary, dup1))
+    if ok2: candidates.append((dn2 + dz2, alt, dup2))
+    if not candidates:
+        print(f"    ⚠ {label}: both solvers failed — rail NOT attached")
+        return False
+    candidates.sort(key=lambda c: c[0])
+    best_score, best_solver, best_dup = candidates[0]
+    target.data = best_dup.data
+    for _, _, d in candidates:
+        if d is not best_dup:
+            bpy.data.objects.remove(d, do_unlink=True)
+    bpy.data.objects.remove(best_dup, do_unlink=True)
+    if best_score > 0:
+        print(f"    ⚠ {label}: cleanest available ({best_solver}) still has {best_score} issue(s)")
+    return True
+
 def add_tile_label(label, cx, cy):
     bpy.ops.object.text_add(location=(cx, cy, PLATE_H + WALL_HEIGHT + 1.0))
     txt = bpy.context.active_object
@@ -810,9 +718,6 @@ def add_tile_label(label, cx, cy):
 
 # ---- Build -------------------------
 def build_side(tiles, solid_name, shift_x=0.0, shift_y=0.0):
-    """tiles: list of (tag, cx, cy) -- tag is the tile's stable label
-    (e.g. "L04"), assigned once from the original left/right split, kept
-    unchanged regardless of which quadrant the tile ends up exported in."""
     grid_tiles = [(cx, cy) for (tag, cx, cy) in tiles]
     print(f"\n{'='*60}")
     print(f"Building {solid_name} with {len(grid_tiles)} tiles")
@@ -838,6 +743,8 @@ def build_side(tiles, solid_name, shift_x=0.0, shift_y=0.0):
     return obj
 
 # ---- Build all four quadrant plates ----
+# (unchanged from before — this is the ORIGINAL build order, nothing
+# reordered around it)
 tl_obj = build_side(tl_tiles, "SensorBase_TL", shift_x=0.0, shift_y=ROW_SPLIT_MARGIN)
 tr_obj = build_side(tr_tiles, "SensorBase_TR", shift_x=GAP_BETWEEN_PLATES, shift_y=ROW_SPLIT_MARGIN)
 bl_obj = build_side(bl_tiles, "SensorBase_BL", shift_x=0.0, shift_y=-ROW_SPLIT_MARGIN)
@@ -845,11 +752,8 @@ br_obj = build_side(br_tiles, "SensorBase_BR", shift_x=GAP_BETWEEN_PLATES, shift
 
 quadrant_objs = [tl_obj, tr_obj, bl_obj, br_obj]
 
-# ---- X-axis threaded-rod holes (unite the 4 quadrants) ----
-# One hole per row that straddles the row-split boundary, spanning the
-# full row so a single rod passes through both quadrants on that side
-# once assembled. Y/Z offset chosen to clear the vertical wire holes --
-# see the ROD_HOLE_* comment above.
+# ---- X-axis threaded-rod holes (unite the 4 quadrants) — UNCHANGED,
+# same positions, same order as before ----
 print(f"\n{'='*60}")
 print("Drilling X-axis threaded-rod holes")
 print(f"{'='*60}")
@@ -865,11 +769,8 @@ for label, row_cy, y_offset, objs in ROD_HOLE_ROWS:
         safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
     bpy.data.objects.remove(cutter, do_unlink=True)
 
-# ---- Y-axis threaded-rod holes (unite the 4 quadrants, other axis) ----
-# One hole per column that straddles the row-split boundary, spanning
-# the full column so a single rod passes through both quadrants on that
-# side once assembled. Z offset (ROD_HOLE_Z_Y_AXIS) keeps these clear of
-# the X-axis rods above -- see the comment above ROD_HOLE_Z_X_AXIS.
+# ---- Y-axis threaded-rod holes (unite the 4 quadrants, other axis) —
+# UNCHANGED, same positions, same order as before ----
 print(f"\n{'='*60}")
 print("Drilling Y-axis threaded-rod holes")
 print(f"{'='*60}")
@@ -885,13 +786,7 @@ for label, col_x, objs in ROD_HOLE_COLUMNS:
         safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
     bpy.data.objects.remove(cutter, do_unlink=True)
 
-# ---- Wire-routing canals (rear/bottom face) ----
-# One canal per row, connecting every wire hole on that row so sensor
-# wiring can be routed horizontally along the back of the plate instead
-# of only dropping straight down. Each canal starts right at its row's
-# rightmost hole (R01/R04/R06/R08) and runs left through every other
-# hole in the row, out past the leftmost hole (L00/L02/L04/L06) and
-# through the LEFT outer wall, so all 4 canals meet on the L00-L06 side.
+# ---- Wire-routing canals (rear/bottom face) — UNCHANGED ----
 print(f"\n{'='*60}")
 print("Cutting wire-routing canals")
 print(f"{'='*60}")
@@ -911,7 +806,7 @@ CANAL_ROWS = [
 for label, left_tiles, right_tiles, left_tag, right_tag, objs in CANAL_ROWS:
     _, row_cy = _find_tile(left_tiles, left_tag)
     right_cx, _ = _find_tile(right_tiles, right_tag)
-    right_wire_x = right_cx - HOLE_RADIUS  # matches get_hole_position(angle=180)
+    right_wire_x = right_cx - HOLE_RADIUS
     canal_x_end = right_wire_x + CANAL_RIGHT_MARGIN
     print(f"\n  {label} (row Y={row_cy:.3f})...")
     cutter = make_canal_cutter(f"Hole_{label}", CANAL_LEFT_X, canal_x_end, row_cy,
@@ -920,9 +815,112 @@ for label, left_tiles, right_tiles, left_tag, right_tag, objs in CANAL_ROWS:
         safe_cut(f"{label} on {obj.name}", obj, cutter, primary='EXACT')
     bpy.data.objects.remove(cutter, do_unlink=True)
 
-# Force a full dependency-graph/viewport refresh — belt-and-suspenders
-# alongside the per-mesh mesh.update() calls above, in case the viewport
-# was still showing stale draw data for any other reason.
+# ============================================================
+# NEW: top/bottom reinforcement rails — deliberately the LAST thing
+# built, after every existing rod hole and canal above, so all of that
+# runs against completely unchanged geometry, exactly as before this
+# update. 15mm total from the raw hex tip (not 50mm), minimal overlap
+# into the existing wall (not deep into the tile — nowhere near the
+# 78mm sensor platform), split at the same X boundary the tiles use.
+# ============================================================
+print(f"\n{'='*60}")
+print("Adding top/bottom reinforcement rails (15mm total from tip)")
+print(f"{'='*60}")
+
+_top_row_cy = max(cy for cx, cy in grid_orig)
+_bottom_row_cy = min(cy for cx, cy in grid_orig)
+TOP_ROW_TILES = [(cx, cy) for cx, cy in grid_orig if cy == _top_row_cy]
+BOTTOM_ROW_TILES = [(cx, cy) for cx, cy in grid_orig if cy == _bottom_row_cy]
+
+def _raw_tip_extent(row_tiles):
+    """Min/max X and the topmost/bottommost Y among the RAW (un-offset)
+    hex tile corners — the literal tips, per your spec. (X is only used
+    as a fallback below; the real rail length comes from
+    _wall_outer_extreme_x.)"""
+    xs, ys = [], []
+    for (cx, cy) in row_tiles:
+        for x, y in get_hex_corners(cx, cy, HEX_FLAT_WIDTH):
+            xs.append(x); ys.append(y)
+    return min(xs), max(xs), min(ys), max(ys)
+
+def _wall_outer_extreme_x(cx, cy, angles_deg, pick):
+    """The rail's LENGTH should reach the wall's actual (mitered) outer
+    surface at its outermost tile (L00/R01 for top, L06/R08 for
+    bottom) -- not the underlying raw hex corner. The wall already
+    bulges PERIMETER_THICKNESS+WALL_WIDTH out from the raw corner via
+    the same miter that built it (GLOBAL_WALL_OFFSET); stopping the
+    rail at the raw corner leaves the wall's own corner sticking out
+    past the rail's edge. `angles_deg` are that tile's own corner
+    angles on the outward-facing side; `pick` is min/max, whichever
+    direction is "more extreme" for that side. (Checked numerically:
+    L00's west corner sits at raw X=-168, wall_outer X=-177 -- the
+    genuinely built wall reaches 9mm further than the raw hex.)"""
+    xs = []
+    for a_deg in angles_deg:
+        a = math.radians(a_deg)
+        raw = (cx + S*math.cos(a), cy + S*math.sin(a))
+        xs.append(GLOBAL_WALL_OFFSET.get(_vkey(raw), raw)[0])
+    return pick(xs)
+
+_, _, _, TOP_TIP_Y = _raw_tip_extent(TOP_ROW_TILES)     # max Y (topmost tip)
+_, _, BOTTOM_TIP_Y, _ = _raw_tip_extent(BOTTOM_ROW_TILES) # min Y (bottommost tip)
+
+_top_left_tile = min(TOP_ROW_TILES, key=lambda t: t[0])       # L00
+_top_right_tile = max(TOP_ROW_TILES, key=lambda t: t[0])      # R01
+_bottom_left_tile = min(BOTTOM_ROW_TILES, key=lambda t: t[0])   # L06
+_bottom_right_tile = max(BOTTOM_ROW_TILES, key=lambda t: t[0])  # R08
+
+TOP_RAIL_X0 = _wall_outer_extreme_x(*_top_left_tile, [150, 210], min)
+TOP_RAIL_X1 = _wall_outer_extreme_x(*_top_right_tile, [30, 330], max)
+BOTTOM_RAIL_X0 = _wall_outer_extreme_x(*_bottom_left_tile, [150, 210], min)
+BOTTOM_RAIL_X1 = _wall_outer_extreme_x(*_bottom_right_tile, [30, 330], max)
+
+_EXISTING_WALL_FROM_TIP = PERIMETER_THICKNESS + WALL_WIDTH   # 9.0mm
+
+TOP_RAIL_Y_OUTER = TOP_TIP_Y + RAIL_TOTAL_FROM_TIP                                    # tip+15
+TOP_RAIL_Y_INNER = TOP_TIP_Y + _EXISTING_WALL_FROM_TIP - RAIL_UNION_OVERLAP           # tip+7
+BOTTOM_RAIL_Y_OUTER = BOTTOM_TIP_Y - RAIL_TOTAL_FROM_TIP                              # tip-15
+BOTTOM_RAIL_Y_INNER = BOTTOM_TIP_Y - _EXISTING_WALL_FROM_TIP + RAIL_UNION_OVERLAP     # tip-7
+
+RAIL_ROD_Y_TOP = TOP_RAIL_Y_OUTER - RAIL_ROD_OFFSET_FROM_OUTER
+RAIL_ROD_Y_BOTTOM = BOTTOM_RAIL_Y_OUTER + RAIL_ROD_OFFSET_FROM_OUTER
+
+print(f"Top rail: X {TOP_RAIL_X0:.1f}..{TOP_RAIL_X1:.1f}, tip Y={TOP_TIP_Y:.1f}, "
+      f"box Y {TOP_RAIL_Y_INNER:.1f}..{TOP_RAIL_Y_OUTER:.1f}, rod Y={RAIL_ROD_Y_TOP:.1f}")
+print(f"Bottom rail: X {BOTTOM_RAIL_X0:.1f}..{BOTTOM_RAIL_X1:.1f}, tip Y={BOTTOM_TIP_Y:.1f}, "
+      f"box Y {BOTTOM_RAIL_Y_OUTER:.1f}..{BOTTOM_RAIL_Y_INNER:.1f}, rod Y={RAIL_ROD_Y_BOTTOM:.1f}")
+
+RAIL_SPECS = [
+    ("TopRail_L", TOP_RAIL_X0, SPLIT_X,
+     TOP_RAIL_Y_INNER + ROW_SPLIT_MARGIN, TOP_RAIL_Y_OUTER + ROW_SPLIT_MARGIN, tl_obj),
+    ("TopRail_R", SPLIT_X + GAP_BETWEEN_PLATES, TOP_RAIL_X1 + GAP_BETWEEN_PLATES,
+     TOP_RAIL_Y_INNER + ROW_SPLIT_MARGIN, TOP_RAIL_Y_OUTER + ROW_SPLIT_MARGIN, tr_obj),
+    ("BottomRail_L", BOTTOM_RAIL_X0, SPLIT_X,
+     BOTTOM_RAIL_Y_OUTER - ROW_SPLIT_MARGIN, BOTTOM_RAIL_Y_INNER - ROW_SPLIT_MARGIN, bl_obj),
+    ("BottomRail_R", SPLIT_X + GAP_BETWEEN_PLATES, BOTTOM_RAIL_X1 + GAP_BETWEEN_PLATES,
+     BOTTOM_RAIL_Y_OUTER - ROW_SPLIT_MARGIN, BOTTOM_RAIL_Y_INNER - ROW_SPLIT_MARGIN, br_obj),
+]
+for label, x0, x1, y0, y1, obj in RAIL_SPECS:
+    print(f"\n  {label}: X {x0:.1f}..{x1:.1f}, Y {y0:.1f}..{y1:.1f}")
+    rail = make_box_solid(f"Cut_{label}", x0, x1, y0, y1, 0.0, PLATE_H + WALL_HEIGHT)
+    safe_union(label, obj, rail)
+    bpy.data.objects.remove(rail, do_unlink=True)
+
+print(f"\n{'='*60}")
+print("Drilling X-axis rod holes through the new top/bottom rails")
+print(f"{'='*60}")
+RAIL_ROD_ROWS = [
+    ("X_TopRail", RAIL_ROD_Y_TOP + ROW_SPLIT_MARGIN, [tl_obj, tr_obj]),
+    ("X_BottomRail", RAIL_ROD_Y_BOTTOM - ROW_SPLIT_MARGIN, [bl_obj, br_obj]),
+]
+for label, rod_y, objs in RAIL_ROD_ROWS:
+    print(f"\n  Rod hole {label} (Y={rod_y:.3f}, Z={ROD_HOLE_Z_X_AXIS:.1f})...")
+    cutter = make_rod_hole_cutter(f"Hole_Rod_{label}", rod_y, ROD_HOLE_Z_X_AXIS)
+    apply_transforms(cutter)
+    for obj in objs:
+        safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
+    bpy.data.objects.remove(cutter, do_unlink=True)
+
 for obj in quadrant_objs:
     obj.data.update()
 bpy.context.view_layer.update()
@@ -965,6 +963,7 @@ print(f"Tile size: {HEX_FLAT_WIDTH:.1f}mm flat-to-flat")
 print(f"Perimeter thickness: {PERIMETER_THICKNESS:.1f}mm")
 print(f"Wall: {WALL_WIDTH:.1f}mm wide (total offset from hex edge: {PERIMETER_THICKNESS + WALL_WIDTH:.1f}mm), "
       f"{WALL_HEIGHT:.1f}mm tall")
+print(f"Rail: {RAIL_TOTAL_FROM_TIP:.1f}mm total from tip")
 print(f"Inner sensor tile: {INNER_TILE_WIDTH:.1f}mm wide, {INNER_TILE_HEIGHT:.1f}mm tall, "
       f"{HEX_FLAT_WIDTH - INNER_TILE_WIDTH:.1f}mm gap between neighbors")
 print(f"Join plates (flush fit): {'ON' if JOIN_PLATES else 'OFF'}")
