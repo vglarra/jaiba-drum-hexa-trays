@@ -23,6 +23,14 @@ INVISIBLE_TILE_GAP = 1.0
 TILE_SPACING = 1.5 * HEX_FLAT_WIDTH
 GAP_BETWEEN_PLATES = 0.0 if JOIN_PLATES else INVISIBLE_TILE_GAP * TILE_SPACING
 
+# ---- ROW SPLIT (4-WAY QUARTER PRINTING) --------------------
+ROW_SPLIT_MARGIN = 3.0   # mm pushback on each side of the row-split zigzag
+                          # boundary (between the two middle rows), so the
+                          # TOP and BOTTOM quadrants sit 2*ROW_SPLIT_MARGIN
+                          # apart. Same idea as GAP_BETWEEN_PLATES but for
+                          # the new split axis -- a small fixed print-bed
+                          # clearance rather than the invisible-tile gap.
+
 # ---- WALL PARAMETERS --------------------
 WALL_WIDTH = 6.0    # extra width beyond PERIMETER_THICKNESS -> total offset from hex edge = PERIMETER_THICKNESS + WALL_WIDTH
 WALL_HEIGHT = 26.0  # extrusion in Z+, starting at the top of the plate (z = PLATE_H)
@@ -103,6 +111,12 @@ if best_split == 0:
 
 SPLIT_X = best_split
 
+# Row split: the boundary between the two middle rows (the zigzag gap
+# where hex tiles from adjacent, column-offset rows meet). With exactly 4
+# rows present, that's always between the 2nd and 3rd row.
+row_ys = sorted(set(round(cy, 2) for cx, cy in grid_orig), reverse=True)
+SPLIT_Y = (row_ys[1] + row_ys[2]) / 2.0
+
 left_grid = []
 right_grid = []
 for cx, cy in grid_orig:
@@ -113,6 +127,30 @@ for cx, cy in grid_orig:
 
 print(f"Split at X = {SPLIT_X:.3f}")
 print(f"Left: {len(left_grid)} tiles, Right: {len(right_grid)} tiles")
+print(f"Split at Y = {SPLIT_Y:.3f}")
+print("=" * 60)
+
+# ---- Quadrants (for 1/4-plate printing) ------------------------
+# Labels (L00.. / R00..) are assigned from the ORIGINAL left_grid/
+# right_grid order above, so a tile keeps the same tag whether it's
+# exported as part of a half-plate or a quarter-plate. Quadrant
+# assignment and the ROW_SPLIT_MARGIN shift are then applied on top,
+# independent of that labeling.
+def split_into_quadrants(half_grid, label_prefix):
+    top, bottom = [], []
+    for i, (cx, cy) in enumerate(half_grid):
+        tag = f"{label_prefix}{i:02d}"
+        if cy >= SPLIT_Y:
+            top.append((tag, cx, cy + ROW_SPLIT_MARGIN))
+        else:
+            bottom.append((tag, cx, cy - ROW_SPLIT_MARGIN))
+    return top, bottom
+
+tl_tiles, bl_tiles = split_into_quadrants(left_grid, 'L')
+tr_tiles, br_tiles = split_into_quadrants(right_grid, 'R')
+
+print(f"Top-Left: {len(tl_tiles)} tiles, Top-Right: {len(tr_tiles)} tiles, "
+      f"Bottom-Left: {len(bl_tiles)} tiles, Bottom-Right: {len(br_tiles)} tiles")
 print("=" * 60)
 
 # ---- Cleanup -------------------------------
@@ -161,7 +199,7 @@ for (cx, cy) in grid_orig:
         ek = tuple(sorted([_vkey(corners[i]), _vkey(corners[j])]))
         FULL_EDGE_COUNT[ek] = FULL_EDGE_COUNT.get(ek, 0) + 1
 
-def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0):
+def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0, shift_y=0.0):
     """Computes ONE offset point per boundary vertex of the union of all
     tiles' flat hexagons, offset outward by `offset_distance` — computed
     ONCE per shared vertex (not once per tile), which is the fix for the
@@ -187,8 +225,8 @@ def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0):
         for i in range(6):
             j = (i + 1) % 6
             p0, p1 = corners[i], corners[j]
-            p0_full = (p0[0] - shift_x, p0[1])
-            p1_full = (p1[0] - shift_x, p1[1])
+            p0_full = (p0[0] - shift_x, p0[1] - shift_y)
+            p1_full = (p1[0] - shift_x, p1[1] - shift_y)
             fek = tuple(sorted([_vkey(p0_full), _vkey(p1_full)]))
             if FULL_EDGE_COUNT.get(fek, 0) != 1:
                 continue  # interior in the full grid, or gap-facing
@@ -260,19 +298,19 @@ GLOBAL_PERIM_OFFSET, _ = compute_boundary_offset_map(grid_orig, PERIMETER_THICKN
 GLOBAL_WALL_OFFSET, _ = compute_boundary_offset_map(grid_orig, PERIMETER_THICKNESS + WALL_WIDTH, shift_x=0.0)
 print("=" * 60)
 
-def globalize_offset_map(local_map, global_map, shift_x):
-    """Overrides each local (per-half) offset value with its globally-
-    mitered equivalent where one exists, shifted into this half's local
-    coordinate space. See the comment above GLOBAL_PERIM_OFFSET."""
+def globalize_offset_map(local_map, global_map, shift_x, shift_y=0.0):
+    """Overrides each local (per-quadrant) offset value with its globally-
+    mitered equivalent where one exists, shifted into this quadrant's
+    local coordinate space. See the comment above GLOBAL_PERIM_OFFSET."""
     out = dict(local_map)
     for k in local_map:
-        gk = (round(k[0] - shift_x, 3), k[1])
+        gk = (round(k[0] - shift_x, 3), round(k[1] - shift_y, 3))
         if gk in global_map:
             gx, gy = global_map[gk]
-            out[k] = (gx + shift_x, gy)
+            out[k] = (gx + shift_x, gy + shift_y)
     return out
 
-def build_plate_body(grid_tiles, solid_name, shift_x=0.0):
+def build_plate_body(grid_tiles, solid_name, shift_x=0.0, shift_y=0.0):
     """Builds the flat hex tiles, the PERIMETER_THICKNESS contour, the
     WALL_WIDTH wall, and the raised inner sensor platform, via bmesh face
     construction, using a shared boundary offset computed ONCE per vertex
@@ -303,10 +341,10 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0):
             ek = tuple(sorted([_vkey(corners[i]), _vkey(corners[j])]))
             edge_count[ek] = edge_count.get(ek, 0) + 1
 
-    perim_offset, dangling_verts = compute_boundary_offset_map(grid_tiles, PERIMETER_THICKNESS, shift_x)
-    wall_outer_offset, _ = compute_boundary_offset_map(grid_tiles, PERIMETER_THICKNESS + WALL_WIDTH, shift_x)
-    perim_offset = globalize_offset_map(perim_offset, GLOBAL_PERIM_OFFSET, shift_x)
-    wall_outer_offset = globalize_offset_map(wall_outer_offset, GLOBAL_WALL_OFFSET, shift_x)
+    perim_offset, dangling_verts = compute_boundary_offset_map(grid_tiles, PERIMETER_THICKNESS, shift_x, shift_y)
+    wall_outer_offset, _ = compute_boundary_offset_map(grid_tiles, PERIMETER_THICKNESS + WALL_WIDTH, shift_x, shift_y)
+    perim_offset = globalize_offset_map(perim_offset, GLOBAL_PERIM_OFFSET, shift_x, shift_y)
+    wall_outer_offset = globalize_offset_map(wall_outer_offset, GLOBAL_WALL_OFFSET, shift_x, shift_y)
 
     # Tile top (Z1): only the RING between the 84mm outer boundary and the
     # 78mm platform boundary — not a solid hex. A solid top face here would
@@ -374,8 +412,8 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0):
             b0 = gv(p0[0], p0[1], z0); b1 = gv(p1[0], p1[1], z0)
             t0 = gv(p0[0], p0[1], z1); t1 = gv(p1[0], p1[1], z1)
 
-            p0_full = (p0[0] - shift_x, p0[1])
-            p1_full = (p1[0] - shift_x, p1[1])
+            p0_full = (p0[0] - shift_x, p0[1] - shift_y)
+            p1_full = (p1[0] - shift_x, p1[1] - shift_y)
             fek = tuple(sorted([_vkey(p0_full), _vkey(p1_full)]))
             if FULL_EDGE_COUNT.get(fek, 0) != 1:
                 try: bm.faces.new([b0, b1, t1, t0])
@@ -587,16 +625,19 @@ def add_tile_label(label, cx, cy):
     return txt
 
 # ---- Build -------------------------
-def build_side(grid_tiles, half_char, solid_name, shift_x=0.0):
+def build_side(tiles, solid_name, shift_x=0.0, shift_y=0.0):
+    """tiles: list of (tag, cx, cy) -- tag is the tile's stable label
+    (e.g. "L04"), assigned once from the original left/right split, kept
+    unchanged regardless of which quadrant the tile ends up exported in."""
+    grid_tiles = [(cx, cy) for (tag, cx, cy) in tiles]
     print(f"\n{'='*60}")
     print(f"Building {solid_name} with {len(grid_tiles)} tiles")
     print(f"{'='*60}")
 
-    obj = build_plate_body(grid_tiles, solid_name, shift_x)
+    obj = build_plate_body(grid_tiles, solid_name, shift_x, shift_y)
 
-    for i, (cx, cy) in enumerate(grid_tiles):
-        tag = f"{half_char}{i:02d}"
-        print(f"\n  [{i+1}/{len(grid_tiles)}] Processing {tag} at ({cx:.3f}, {cy:.3f})...")
+    for i, (tag, cx, cy) in enumerate(tiles):
+        print(f"\n  [{i+1}/{len(tiles)}] Processing {tag} at ({cx:.3f}, {cy:.3f})...")
 
         wire = make_wire_hole_cutter(f"Wire_{tag}", cx, cy)
         apply_transforms(wire)
@@ -612,15 +653,19 @@ def build_side(grid_tiles, half_char, solid_name, shift_x=0.0):
 
     return obj
 
-# ---- Build both plates ----
-left_obj = build_side(left_grid, 'L', "SensorBase_L", shift_x=0.0)
-right_obj = build_side(right_grid, 'R', "SensorBase_R", shift_x=GAP_BETWEEN_PLATES)
+# ---- Build all four quadrant plates ----
+tl_obj = build_side(tl_tiles, "SensorBase_TL", shift_x=0.0, shift_y=ROW_SPLIT_MARGIN)
+tr_obj = build_side(tr_tiles, "SensorBase_TR", shift_x=GAP_BETWEEN_PLATES, shift_y=ROW_SPLIT_MARGIN)
+bl_obj = build_side(bl_tiles, "SensorBase_BL", shift_x=0.0, shift_y=-ROW_SPLIT_MARGIN)
+br_obj = build_side(br_tiles, "SensorBase_BR", shift_x=GAP_BETWEEN_PLATES, shift_y=-ROW_SPLIT_MARGIN)
+
+quadrant_objs = [tl_obj, tr_obj, bl_obj, br_obj]
 
 # Force a full dependency-graph/viewport refresh — belt-and-suspenders
 # alongside the per-mesh mesh.update() calls above, in case the viewport
 # was still showing stale draw data for any other reason.
-left_obj.data.update()
-right_obj.data.update()
+for obj in quadrant_objs:
+    obj.data.update()
 bpy.context.view_layer.update()
 for area in bpy.context.screen.areas:
     if area.type == 'VIEW_3D':
@@ -645,14 +690,18 @@ def export_obj(obj, filename):
         except Exception as e2:
             print(f"❌ Export failed: {e2}")
 
-export_obj(left_obj,  "flat_hex_plate-Walls2_LEFT.stl")
-export_obj(right_obj, "flat_hex_plate-Walls2_RIGHT.stl")
+export_obj(tl_obj, "flat_hex_plate-Walls2_TOP_LEFT.stl")
+export_obj(tr_obj, "flat_hex_plate-Walls2_TOP_RIGHT.stl")
+export_obj(bl_obj, "flat_hex_plate-Walls2_BOTTOM_LEFT.stl")
+export_obj(br_obj, "flat_hex_plate-Walls2_BOTTOM_RIGHT.stl")
 
 print("\n" + "="*60)
 print("=== DONE ===")
-print(f"Left plate: {len(left_grid)} tiles")
-print(f"Right plate: {len(right_grid)} tiles")
-print(f"Total tiles: {len(left_grid) + len(right_grid)}")
+print(f"Top-Left plate: {len(tl_tiles)} tiles")
+print(f"Top-Right plate: {len(tr_tiles)} tiles")
+print(f"Bottom-Left plate: {len(bl_tiles)} tiles")
+print(f"Bottom-Right plate: {len(br_tiles)} tiles")
+print(f"Total tiles: {len(tl_tiles) + len(tr_tiles) + len(bl_tiles) + len(br_tiles)}")
 print(f"Tile size: {HEX_FLAT_WIDTH:.1f}mm flat-to-flat")
 print(f"Perimeter thickness: {PERIMETER_THICKNESS:.1f}mm")
 print(f"Wall: {WALL_WIDTH:.1f}mm wide (total offset from hex edge: {PERIMETER_THICKNESS + WALL_WIDTH:.1f}mm), "
@@ -661,5 +710,6 @@ print(f"Inner sensor tile: {INNER_TILE_WIDTH:.1f}mm wide, {INNER_TILE_HEIGHT:.1f
       f"{HEX_FLAT_WIDTH - INNER_TILE_WIDTH:.1f}mm gap between neighbors")
 print(f"Join plates (flush fit): {'ON' if JOIN_PLATES else 'OFF'}")
 print(f"Invisible tile gap: {INVISIBLE_TILE_GAP:.1f} tiles = {GAP_BETWEEN_PLATES:.1f}mm")
+print(f"Row split margin: {ROW_SPLIT_MARGIN:.1f}mm each side ({2*ROW_SPLIT_MARGIN:.1f}mm total gap)")
 print(f"Wire hole diameter: {WIRE_HOLE_DIAMETER:.1f}mm")
 print("="*60)
