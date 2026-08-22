@@ -39,16 +39,21 @@ WALL_HEIGHT = 26.0
 # so those all run against completely unchanged geometry, exactly as
 # before.
 RAIL_TOTAL_FROM_TIP = 15.0
-RAIL_ROD_OFFSET_FROM_OUTER = 4.3   # rod sits this far IN from the rail's
-                                    # true outer edge (y_outer). Kept
-                                    # clear of a peak's own reach (a
-                                    # peak's wall surface sits ~10.4mm
-                                    # from the tip, so the rod's 3.5mm
-                                    # radius around offset 4.3 stays
-                                    # safely within the 15mm-from-tip
-                                    # material there) without sitting
-                                    # so far in that it nears the
-                                    # sensor platform at a valley.
+RAIL_ROD_OFFSET_FROM_OUTER = 7.3   # rod sits this far IN from the rail's
+                                    # true outer edge (y_outer). Was 4.3,
+                                    # then 8.3 (+4mm in), then backed off
+                                    # 1mm to here -- at 8.3 the rod center
+                                    # sat only 6.7mm from a peak's tip
+                                    # (15-8.3), and the hex wedge there is
+                                    # only ~7.7mm wide (2*6.7*tan(30 deg)),
+                                    # barely wider than the rod's own 7mm
+                                    # diameter -- confirmed in-engine as
+                                    # the rod grazing/cutting through the
+                                    # tip's own side walls. At 7.3, rod
+                                    # center sits 7.7mm from the tip where
+                                    # the wedge is ~8.9mm wide, giving
+                                    # ~0.9mm clearance each side. Z
+                                    # (RAIL_ROD_Z) and X untouched.
 RAIL_ROD_Z = (PLATE_H + WALL_HEIGHT) - 10.0   # the rail's own rod moves up
                                                 # toward the TOP of the rail
                                                 # (Z+) instead of sharing the
