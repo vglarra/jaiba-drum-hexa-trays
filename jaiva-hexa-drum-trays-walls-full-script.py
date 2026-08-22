@@ -14,9 +14,14 @@ PERIMETER_THICKNESS = 3.0
 TOTAL_WIDTH = HEX_FLAT_WIDTH + 2 * PERIMETER_THICKNESS
 
 # ---- INVISIBLE TILE GAP --------------------
+JOIN_PLATES = False   # switch: True/1 = butt the RIGHT plate flush against
+                        # the LEFT plate (zero gap, ignores INVISIBLE_TILE_GAP
+                        # below) so they form one continuous surface along
+                        # the split line. False/0 = keep the plates apart by
+                        # INVISIBLE_TILE_GAP (old/default behavior).
 INVISIBLE_TILE_GAP = 1.0
 TILE_SPACING = 1.5 * HEX_FLAT_WIDTH
-GAP_BETWEEN_PLATES = INVISIBLE_TILE_GAP * TILE_SPACING
+GAP_BETWEEN_PLATES = 0.0 if JOIN_PLATES else INVISIBLE_TILE_GAP * TILE_SPACING
 
 # ---- WALL PARAMETERS --------------------
 WALL_WIDTH = 6.0    # extra width beyond PERIMETER_THICKNESS -> total offset from hex edge = PERIMETER_THICKNESS + WALL_WIDTH
@@ -62,7 +67,8 @@ print(f"Wall: {WALL_WIDTH:.1f}mm wide (total offset from hex edge: {PERIMETER_TH
 print(f"Inner sensor tile: {INNER_TILE_WIDTH:.1f}mm wide, {INNER_TILE_HEIGHT:.1f}mm tall "
       f"(z={PLATE_H:.1f}..{PLATE_H + INNER_TILE_HEIGHT:.1f}mm), "
       f"{HEX_FLAT_WIDTH - INNER_TILE_WIDTH:.1f}mm gap between neighboring platforms")
-print(f"Gap between plates: {GAP_BETWEEN_PLATES:.1f}mm")
+print(f"Gap between plates: {GAP_BETWEEN_PLATES:.1f}mm"
+      + (" (JOIN_PLATES on -- flush fit)" if JOIN_PLATES else ""))
 print("=" * 60)
 
 # ---- Grid ------------------------
@@ -623,6 +629,7 @@ print(f"Wall: {WALL_WIDTH:.1f}mm wide (total offset from hex edge: {PERIMETER_TH
       f"{WALL_HEIGHT:.1f}mm tall")
 print(f"Inner sensor tile: {INNER_TILE_WIDTH:.1f}mm wide, {INNER_TILE_HEIGHT:.1f}mm tall, "
       f"{HEX_FLAT_WIDTH - INNER_TILE_WIDTH:.1f}mm gap between neighbors")
+print(f"Join plates (flush fit): {'ON' if JOIN_PLATES else 'OFF'}")
 print(f"Invisible tile gap: {INVISIBLE_TILE_GAP:.1f} tiles = {GAP_BETWEEN_PLATES:.1f}mm")
 print(f"Wire hole diameter: {WIRE_HOLE_DIAMETER:.1f}mm")
 print("="*60)
