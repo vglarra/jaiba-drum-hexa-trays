@@ -594,6 +594,19 @@ def report_manifold_stats(obj):
     bm.free()
     return nonmanifold, zero_area
 
+def mesh_volume(obj):
+    """Actual enclosed volume (mm^3) -- unlike vertex/face counts or the
+    non-manifold check, this can't be fooled by a topologically 'clean'
+    result that didn't remove the material it was supposed to. A real
+    full-length rod tunnel removes pi*r^2*(length through solid); two
+    disconnected surface notches remove only a sliver of that."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.normal_update()
+    vol = bm.calc_volume(signed=False)
+    bm.free()
+    return vol
+
 def duplicate_obj(obj, name):
     new_data = obj.data.copy()
     new_obj = bpy.data.objects.new(name, new_data)
@@ -743,22 +756,26 @@ for label, row_cy, y_offset, objs in ROD_HOLE_ROWS:
         safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
     bpy.data.objects.remove(cutter, do_unlink=True)
 
-# ---- Y-axis threaded-rod holes (unite the 4 quadrants, other axis) —
-# UNCHANGED, same positions, same order as before ----
-print(f"\n{'='*60}")
-print("Drilling Y-axis threaded-rod holes")
-print(f"{'='*60}")
+# ---- Y-axis threaded-rod holes (unite the 4 quadrants, other axis) --
+# positions unchanged from before, but the actual CUTTING now happens
+# in a single pass AFTER the rails are merged in (see "Drilling
+# Y-axis threaded-rod holes (through rails)" near the end), not here.
+# Cutting this column twice -- once now against the bare wall, once
+# again later once the rail exists -- put the second cut's cylindrical
+# surface exactly coincident with a long stretch of the first cut's
+# own tunnel-wall surface (same axis, same radius, just shorter). Confirmed
+# in-engine: that's the same degenerate coincident-geometry situation
+# behind the rail/wall duplicate-face bug found earlier this session --
+# except here the EXACT solver resolved it into a result that stayed
+# watertight (so safe_cut's own non-manifold check couldn't catch it)
+# while actually re-sealing the passage instead of extending it, so the
+# rod hole vanished even though every log line reported a clean cut.
+# One cut, after the rail exists, never creates that coincident surface
+# in the first place.
 ROD_HOLE_COLUMNS = [
     ("Y_L00-L01_L06", ROD_HOLE_X_LEFT, [tl_obj, bl_obj]),
     ("Y_R00-R01_R08", ROD_HOLE_X_RIGHT + GAP_BETWEEN_PLATES, [tr_obj, br_obj]),
 ]
-for label, col_x, objs in ROD_HOLE_COLUMNS:
-    print(f"\n  Rod hole {label} (column X={col_x:.3f}, Z={ROD_HOLE_Z_Y_AXIS:.1f})...")
-    cutter = make_rod_hole_cutter_y(f"Hole_Rod_{label}", col_x, ROD_HOLE_Z_Y_AXIS)
-    apply_transforms(cutter)
-    for obj in objs:
-        safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
-    bpy.data.objects.remove(cutter, do_unlink=True)
 
 # ---- Wire-routing canals (rear/bottom face) — UNCHANGED ----
 print(f"\n{'='*60}")
@@ -883,107 +900,155 @@ print(f"Bottom rail: X {BOTTOM_RAIL_X0:.1f}..{BOTTOM_RAIL_X1:.1f}, tip Y={BOTTOM
 # no separate "overlap into the wall" offset needed any more (there's
 # no boolean left for an epsilon to help).
 
-def _row_offset_chain(row_tiles, tip_angle, left_angle, right_angle, offset_map):
-    """Ordered (west-to-east) chain of a row's top/bottom silhouette
-    points -- for each tile: its west corner, its own tip, its east
-    corner -- run through `offset_map`'s miter, with consecutive shared
-    corners (two tiles' common valley vertex) de-duplicated. Each
-    point is tagged with its owning tile's cx: once split at SPLIT_X,
-    that tag is what tells merge_rail_into_wall whether a given floor
-    segment's wall face already exists in THIS quadrant's own mesh
-    (owner on this quadrant's side) or in the other one entirely
-    (owner across SPLIT_X, e.g. R07 for BottomRail_L -- BL never
-    builds R07's wall at all, so nothing exists there to hand off)."""
-    chain = []
+def _row_offset_segments(row_tiles, tip_angle, left_angle, right_angle, offset_map):
+    """Ordered (west-to-east) list of (p0, p1, owner_cx) segments
+    tracing a row's top/bottom silhouette -- each segment is exactly
+    ONE tile's own left-to-tip or tip-to-right edge, run through
+    `offset_map`'s miter. Ownership is tracked per SEGMENT, not per
+    point: a shared valley point genuinely belongs to two tiles at
+    once, so tagging the POINT (and inheriting that tag for whichever
+    segment starts there) is ambiguous -- the segment leaving a valley
+    into the NEXT tile is that next tile's own edge, not the previous
+    tile's, even though they share that one point. Verified this was
+    a real bug: for BottomRail_L, the segment from L06's shared corner
+    into R07's own tip inherited L06's tag and was wrongly treated as
+    local to BL (should be foreign, R07 lives in BR), leaving a
+    genuine hole with neither an old face deleted nor a new one built."""
+    segments = []
+    def pt(cx, cy, a_deg):
+        a = math.radians(a_deg)
+        raw = (cx + S * math.cos(a), cy + S * math.sin(a))
+        return offset_map.get(_vkey(raw), raw)
     for (cx, cy) in sorted(row_tiles, key=lambda t: t[0]):
-        for a_deg in (left_angle, tip_angle, right_angle):
-            a = math.radians(a_deg)
-            raw = (cx + S * math.cos(a), cy + S * math.sin(a))
-            chain.append((offset_map.get(_vkey(raw), raw), cx))
-    deduped = []
-    for p, owner in chain:
-        if deduped and _vkey(deduped[-1][0]) == _vkey(p):
-            continue
-        deduped.append((p, owner))
-    return deduped
+        left, tip, right = pt(cx, cy, left_angle), pt(cx, cy, tip_angle), pt(cx, cy, right_angle)
+        segments.append((left, tip, cx))
+        segments.append((tip, right, cx))
+    return segments
 
-def _split_chain_at_x(chain, split_x):
-    """Splits an ordered west-to-east chain of (point, owner_cx) pairs
-    into (left, right) at X=split_x, interpolating a crossing point
-    (tagged owner=None -- belongs to neither side's own tiles) if
-    split_x falls mid-segment rather than exactly on a chain vertex --
-    so both halves meet exactly at split_x, same as the rail's own X
-    boundary between quadrants."""
+def _split_segments_at_x(segments, split_x):
+    """Splits an ordered west-to-east list of (p0, p1, owner_cx)
+    segments into (left, right) at X=split_x, cutting any segment that
+    straddles split_x into two pieces -- both keeping the SAME owner,
+    since splitting for the quadrant boundary doesn't change which
+    tile's edge this geometrically is. Both halves meet exactly at
+    split_x, same as the rail's own X boundary between quadrants."""
     left, right = [], []
-    for i, (p, owner) in enumerate(chain):
-        if p[0] <= split_x:
-            left.append((p, owner))
-        if p[0] >= split_x:
-            right.append((p, owner))
-        if i + 1 < len(chain):
-            p0, _ = chain[i]
-            p1, _ = chain[i + 1]
-            if (p0[0] < split_x < p1[0]) or (p1[0] < split_x < p0[0]):
-                t = (split_x - p0[0]) / (p1[0] - p0[0])
-                cross = (split_x, p0[1] + t * (p1[1] - p0[1]))
-                left.append((cross, None))
-                right.append((cross, None))
+    for p0, p1, owner in segments:
+        x0, x1 = p0[0], p1[0]
+        if x0 <= split_x and x1 <= split_x:
+            left.append((p0, p1, owner))
+        elif x0 >= split_x and x1 >= split_x:
+            right.append((p0, p1, owner))
+        else:
+            t = (split_x - x0) / (x1 - x0)
+            cross = (split_x, p0[1] + t * (p1[1] - p0[1]))
+            if x0 < x1:
+                left.append((p0, cross, owner)); right.append((cross, p1, owner))
+            else:
+                right.append((p0, cross, owner)); left.append((cross, p1, owner))
     return left, right
 
-def _find_and_delete_face_at(bm, positions):
-    """Deletes the first face in `bm` whose vertices sit exactly (to
-    0.001mm) at `positions` (any order), if one exists. Used to remove
-    a quadrant's own now-obsolete wall-outer face once rail material
-    extends past it -- see merge_rail_into_wall."""
-    target = frozenset(_vkey3(p) for p in positions)
-    for f in bm.faces:
-        if len(f.verts) != len(positions):
-            continue
-        if frozenset(_vkey3(v.co) for v in f.verts) == target:
-            bmesh.ops.delete(bm, geom=[f], context='FACES')
-            return True
-    return False
+# Looser (0.01mm) match, used ONLY for the rail-merge ownership lookup
+# below -- NOT a replacement for the global _vkey (that stays at
+# 0.001mm everywhere else, since loosening it globally risks false
+# merges elsewhere). By the time the rail merge runs, the wall has
+# already been through several earlier, unrelated boolean cuts (wire
+# holes, rod holes, canals); even where those cuts are nowhere near a
+# given wall-outer corner, Blender's solver can still nudge that
+# vertex's stored coordinate by a few microns as a side effect of its
+# own internal numerics -- invisible at print scale but enough to flip
+# a 0.001mm-rounded key. Nothing in this design has two distinct
+# features closer than 0.01mm (the smallest real feature is a 3.5mm
+# rod radius), so loosening just this comparison is safe.
+def _vkey_loose(p):
+    return (round(p[0], 2), round(p[1], 2))
 
-def _vkey3(p):
-    return (round(p[0], 3), round(p[1], 3), round(p[2], 3))
+def _face_on_wall_segment(face, p0, p1, z0, z1, tol=0.05):
+    """True if EVERY vertex of `face` lies on the vertical plane
+    containing the line through p0->p1, within the segment's own span
+    (0<=t<=1 along it, a little slack at the ends) and within
+    [z0,z1] (a little slack top/bottom) -- i.e. this face is some
+    fragment of "the wall's own surface along this one tile edge",
+    however many pieces it's currently in. Matching by an exact set of
+    4 corners (the original approach, even loosened to 0.01mm) turned
+    out to miss real cases: an EARLIER, unrelated cut (e.g. a Y-axis
+    rod hole passing straight through a tip point at Z=11.5..18.5) can
+    split what was one tall z0..z1 quad into a below-hole piece, an
+    above-hole piece, and the hole's own boundary fragments -- NONE of
+    which still has all 4 of the original z0/z1 corners, so the exact
+    search finds nothing and leaves the fragments behind (confirmed:
+    a standalone bmesh-free replica reproduced the exact "0 obsolete
+    replaced" + lingering non-manifold edges seen in-engine once a rod
+    hole was simulated through that tip). A line/span/Z containment
+    test catches every fragment regardless of how it was subdivided,
+    without touching the rod hole's own tunnel-wall faces (those bow
+    away from this flat plane into the material, so only their
+    boundary-circle vertices could ever satisfy this test, and a
+    single face never has ALL its verts on that boundary alone)."""
+    dx, dy = p1[0]-p0[0], p1[1]-p0[1]
+    L = math.hypot(dx, dy)
+    if L < 1e-9:
+        return False
+    tol_t = tol / L
+    for v in face.verts:
+        vx, vy, vz = v.co.x, v.co.y, v.co.z
+        t = ((vx-p0[0])*dx + (vy-p0[1])*dy) / (L*L)
+        if t < -tol_t or t > 1 + tol_t:
+            return False
+        perp = abs((vx-p0[0])*dy - (vy-p0[1])*dx) / L
+        if perp > tol:
+            return False
+        if vz < z0 - tol or vz > z1 + tol:
+            return False
+    return True
 
-def merge_rail_into_wall(label, target_obj, x0, x1, y_outer, chain, is_top,
+def _find_and_delete_faces_on_segment(bm, p0, p1, z0, z1):
+    """Deletes every face in `bm` that's some fragment of the wall's
+    own surface along the p0->p1 tile edge -- see
+    _face_on_wall_segment. Returns how many faces were deleted."""
+    to_delete = [f for f in bm.faces if _face_on_wall_segment(f, p0, p1, z0, z1)]
+    if to_delete:
+        bmesh.ops.delete(bm, geom=to_delete, context='FACES')
+    return len(to_delete)
+
+def merge_rail_into_wall(label, target_obj, x0, x1, y_outer, segments, is_top,
                           z0, z1, shift_x, shift_y, is_local_owner):
     """Adds the rail's NEW material directly into target_obj's own
     mesh -- no boolean union, no separate rail object at all. The
-    silhouette is the flat outer roof plus the chain tracing the
-    wall's true surface, closing into one simple polygon.
+    silhouette is the flat outer roof plus the segment chain tracing
+    the wall's true surface, closing into one simple polygon.
 
-    Every "floor" segment (both endpoints on the chain, not the roof)
-    corresponds to a vertical face that ALREADY exists somewhere as
-    part of the wall's own exterior geometry, built by build_plate_body
-    from these same two consecutive hex-corner angles -- but WHICH
-    quadrant's mesh it lives in depends on which tile actually owns
-    that edge (`is_local_owner`, using each point's tagged owner_cx
-    from _row_offset_chain/_split_chain_at_x):
+    Every "floor" segment corresponds to a vertical face that ALREADY
+    exists somewhere as part of the wall's own exterior geometry, built
+    by build_plate_body from this same tile edge -- but WHICH
+    quadrant's mesh it lives in depends on which tile actually owns it
+    (`segments`' own owner_cx, unambiguous per-segment -- see
+    _row_offset_segments):
       - owner tile is in THIS quadrant: that exact wall-outer face is
         already sitting in target_obj's own mesh. It's now purely
-        internal (rail material continues past it), so it gets found
-        and DELETED here rather than building a second, duplicate
-        face on top of it -- confirmed as the real cause of the gap
-        found in the sliced STL (two solids with a genuinely
-        duplicate, exactly-coincident face along their shared
-        boundary is a case a boolean solver can resolve wrong; even
-        merged directly as one mesh, a duplicate face is still wrong).
+        internal (rail material continues past it), so every face
+        occupying that position gets found and DELETED here rather
+        than building a second, duplicate face on top of it --
+        confirmed as the real cause of the gap found in the sliced
+        STL (two solids with a genuinely duplicate, exactly-coincident
+        face along their shared boundary is a case a boolean solver
+        can resolve wrong; even merged directly as one mesh, a
+        duplicate face is still wrong).
       - owner tile is in the OTHER quadrant (e.g. R07 for
         BottomRail_L): target_obj's mesh never had a face there at
         all, so a brand new side wall gets built, same as for the
         roof/end-cap segments.
     remove_doubles then welds every new vertex that lands exactly on
-    an existing wall vertex -- which is every chain point, since the
-    whole chain comes straight from GLOBAL_WALL_OFFSET, the wall's
+    an existing wall vertex -- which is every segment endpoint, since
+    the whole chain comes straight from GLOBAL_WALL_OFFSET, the wall's
     own true surface."""
+    chain_pts = [segments[0][0]] + [s[1] for s in segments]
     roof = [((x0, y_outer), True, None), ((x1, y_outer), True, None)]
-    body = [(p, False, owner) for p, owner in reversed(chain)]
+    body = [(p, False, None) for p in reversed(chain_pts)]
     pts = roof + body
     if is_top:
         pts = list(reversed(pts))
-    pts = [((x + shift_x, y + shift_y), is_roof, owner) for (x, y), is_roof, owner in pts]
+    pts = [((x + shift_x, y + shift_y), is_roof) for (x, y), is_roof, _ in pts]
 
     bm = bmesh.new()
     bm.from_mesh(target_obj.data)
@@ -995,12 +1060,21 @@ def merge_rail_into_wall(label, target_obj, x0, x1, y_outer, chain, is_top,
         return vmap[k]
 
     n = len(pts)
-    bv = [gv(p[0], p[1], z0) for p, _, _ in pts]
-    tv = [gv(p[0], p[1], z1) for p, _, _ in pts]
+    bv = [gv(p[0], p[1], z0) for p, _ in pts]
+    tv = [gv(p[0], p[1], z1) for p, _ in pts]
     try: bm.faces.new(list(reversed(bv)))
     except ValueError: pass
     try: bm.faces.new(tv)
     except ValueError: pass
+
+    # Look up each floor edge's owner by its two (unshifted) endpoint
+    # positions directly, rather than trying to track index offsets
+    # through the roof-prepended, reversed point list above.
+    seg_owner_by_edge = {}
+    for p0, p1, owner in segments:
+        key = frozenset([_vkey_loose(p0), _vkey_loose(p1)])
+        seg_owner_by_edge[key] = owner
+
     deleted = 0
     for k in range(n):
         kk = (k + 1) % n
@@ -1009,14 +1083,12 @@ def merge_rail_into_wall(label, target_obj, x0, x1, y_outer, chain, is_top,
             try: bm.faces.new([bv[k], bv[kk], tv[kk], tv[k]])
             except ValueError: pass
             continue
-        owner = pts[k][2] if pts[k][2] is not None else pts[kk][2]
+        edge_key = frozenset([_vkey_loose((bv[k].co.x - shift_x, bv[k].co.y - shift_y)),
+                               _vkey_loose((bv[kk].co.x - shift_x, bv[kk].co.y - shift_y))])
+        owner = seg_owner_by_edge.get(edge_key)
         if owner is not None and is_local_owner(owner):
-            positions = [
-                (bv[k].co.x, bv[k].co.y, z0), (bv[kk].co.x, bv[kk].co.y, z0),
-                (bv[kk].co.x, bv[kk].co.y, z1), (bv[k].co.x, bv[k].co.y, z1),
-            ]
-            if _find_and_delete_face_at(bm, positions):
-                deleted += 1
+            deleted += _find_and_delete_faces_on_segment(
+                bm, (bv[k].co.x, bv[k].co.y), (bv[kk].co.x, bv[kk].co.y), z0, z1)
         else:
             try: bm.faces.new([bv[k], bv[kk], tv[kk], tv[k]])
             except ValueError: pass
@@ -1032,27 +1104,27 @@ def merge_rail_into_wall(label, target_obj, x0, x1, y_outer, chain, is_top,
           f"{deleted} obsolete wall face(s) replaced) -- "
           f"non-manifold edges: {nm}, zero-area faces: {za}")
 
-TOP_FULL_CHAIN = _row_offset_chain(TOP_ROW_TILES, 90, 150, 30, GLOBAL_WALL_OFFSET)
-BOTTOM_FULL_CHAIN = _row_offset_chain(BOTTOM_ROW_TILES, 270, 210, 330, GLOBAL_WALL_OFFSET)
-TOP_CHAIN_L, TOP_CHAIN_R = _split_chain_at_x(TOP_FULL_CHAIN, SPLIT_X)
-BOTTOM_CHAIN_L, BOTTOM_CHAIN_R = _split_chain_at_x(BOTTOM_FULL_CHAIN, SPLIT_X)
+TOP_FULL_SEGMENTS = _row_offset_segments(TOP_ROW_TILES, 90, 150, 30, GLOBAL_WALL_OFFSET)
+BOTTOM_FULL_SEGMENTS = _row_offset_segments(BOTTOM_ROW_TILES, 270, 210, 330, GLOBAL_WALL_OFFSET)
+TOP_SEGMENTS_L, TOP_SEGMENTS_R = _split_segments_at_x(TOP_FULL_SEGMENTS, SPLIT_X)
+BOTTOM_SEGMENTS_L, BOTTOM_SEGMENTS_R = _split_segments_at_x(BOTTOM_FULL_SEGMENTS, SPLIT_X)
 
 _is_left = lambda owner_cx: owner_cx < SPLIT_X
 _is_right = lambda owner_cx: owner_cx >= SPLIT_X
 
 RAIL_SPECS = [
-    ("TopRail_L", TOP_RAIL_X0, SPLIT_X, TOP_RAIL_Y_OUTER, TOP_CHAIN_L,
+    ("TopRail_L", TOP_RAIL_X0, SPLIT_X, TOP_RAIL_Y_OUTER, TOP_SEGMENTS_L,
      True, 0.0, ROW_SPLIT_MARGIN, tl_obj, _is_left),
-    ("TopRail_R", SPLIT_X, TOP_RAIL_X1, TOP_RAIL_Y_OUTER, TOP_CHAIN_R,
+    ("TopRail_R", SPLIT_X, TOP_RAIL_X1, TOP_RAIL_Y_OUTER, TOP_SEGMENTS_R,
      True, GAP_BETWEEN_PLATES, ROW_SPLIT_MARGIN, tr_obj, _is_right),
-    ("BottomRail_L", BOTTOM_RAIL_X0, SPLIT_X, BOTTOM_RAIL_Y_OUTER, BOTTOM_CHAIN_L,
+    ("BottomRail_L", BOTTOM_RAIL_X0, SPLIT_X, BOTTOM_RAIL_Y_OUTER, BOTTOM_SEGMENTS_L,
      False, 0.0, -ROW_SPLIT_MARGIN, bl_obj, _is_left),
-    ("BottomRail_R", SPLIT_X, BOTTOM_RAIL_X1, BOTTOM_RAIL_Y_OUTER, BOTTOM_CHAIN_R,
+    ("BottomRail_R", SPLIT_X, BOTTOM_RAIL_X1, BOTTOM_RAIL_Y_OUTER, BOTTOM_SEGMENTS_R,
      False, GAP_BETWEEN_PLATES, -ROW_SPLIT_MARGIN, br_obj, _is_right),
 ]
-for label, x0, x1, y_outer, chain, is_top, shift_x, shift_y, obj, is_local_owner in RAIL_SPECS:
+for label, x0, x1, y_outer, segments, is_top, shift_x, shift_y, obj, is_local_owner in RAIL_SPECS:
     print(f"\n  {label}: X {x0:.1f}..{x1:.1f}, y_outer={y_outer:.1f}")
-    merge_rail_into_wall(label, obj, x0, x1, y_outer, chain, is_top,
+    merge_rail_into_wall(label, obj, x0, x1, y_outer, segments, is_top,
                           0.0, PLATE_H + WALL_HEIGHT, shift_x, shift_y, is_local_owner)
 
 print(f"\n{'='*60}")
@@ -1074,6 +1146,62 @@ for label, rod_y, objs in RAIL_ROD_ROWS:
     apply_transforms(cutter)
     for obj in objs:
         safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
+    bpy.data.objects.remove(cutter, do_unlink=True)
+
+# ---- Drill the two Y-axis rod holes now that the rails exist -- this
+# is now the ONLY place they're cut (see the note by ROD_HOLE_COLUMNS
+# above): one pass, through the complete wall+rail solid, so the
+# cutter's cylindrical surface never has to coincide with a
+# pre-existing tunnel wall from an earlier pass at the same axis.
+print(f"\n{'='*60}")
+print("Drilling Y-axis threaded-rod holes (through rails)")
+print(f"{'='*60}")
+for label, col_x, objs in ROD_HOLE_COLUMNS:
+    print(f"\n  Rod hole {label} (column X={col_x:.3f}, Z={ROD_HOLE_Z_Y_AXIS:.1f})...")
+    # Shortened from the default 2000mm for the same reason the rail's
+    # own X-axis rod cutters were: the real geometry here only spans
+    # about 345mm (TOP_RAIL_Y_OUTER=172.6 down to BOTTOM_RAIL_Y_OUTER=
+    # -172.6) -- a 2000mm cutter is 1650mm+ of pure empty overhang for
+    # the EXACT solver to carry through the operation. Confirmed
+    # in-engine: with the full-length cutter, this cut reported "clean"
+    # (0 non-manifold) while actually adding only 64 new vertices and 4
+    # new faces per quadrant -- consistent with punching two separate
+    # round openings (entry/exit) WITHOUT the connecting tunnel wall
+    # between them, i.e. two blind dimples, not a through-hole. 450mm
+    # (225mm each side of Y=0) clears the full rail-to-rail span with
+    # margin.
+    cutter = make_rod_hole_cutter_y(f"Hole_Rod_{label}", col_x, ROD_HOLE_Z_Y_AXIS, length=450.0)
+    apply_transforms(cutter)
+    for obj in objs:
+        # Diagnostic: a boolean that "cuts cleanly" (0 non-manifold, no
+        # leaked verts) can still be a silent no-op if the cutter never
+        # actually overlapped solid material -- report_manifold_stats
+        # can't tell a real tunnel apart from nothing happening at all,
+        # since both leave a clean, unchanged-looking mesh. Vertex/face
+        # counts can't lie about that: a real cut always adds new
+        # vertices along the cylinder's intersection curve.
+        bb = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+        bb_xs = [v.x for v in bb]; bb_ys = [v.y for v in bb]; bb_zs = [v.z for v in bb]
+        print(f"    {obj.name} bbox: X {min(bb_xs):.1f}..{max(bb_xs):.1f}, "
+              f"Y {min(bb_ys):.1f}..{max(bb_ys):.1f}, Z {min(bb_zs):.1f}..{max(bb_zs):.1f}")
+        v0, f0 = len(obj.data.vertices), len(obj.data.polygons)
+        vol0 = mesh_volume(obj)
+        # Experiment: EXACT reported "clean" (0 non-manifold) on this
+        # exact cut while the volume/face evidence says it barely
+        # removed anything -- safe_cut's own "primary looked clean,
+        # stop there" shortcut means FLOAT never even gets tried as a
+        # comparison in that case. Forcing FLOAT as primary here tests
+        # whether it handles this column's geometry differently.
+        safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='FLOAT')
+        v1, f1 = len(obj.data.vertices), len(obj.data.polygons)
+        vol1 = mesh_volume(obj)
+        if v1 == v0 and f1 == f0:
+            print(f"    ⚠⚠ {obj.name}: vertex/face count UNCHANGED ({v0}v/{f0}f) -- "
+                  f"this cut did NOT modify the mesh at all, despite reporting clean")
+        else:
+            print(f"    {obj.name}: {v0}v/{f0}f -> {v1}v/{f1}f")
+        print(f"    {obj.name}: volume {vol0:.0f}mm^3 -> {vol1:.0f}mm^3 "
+              f"(removed {vol0-vol1:.0f}mm^3)")
     bpy.data.objects.remove(cutter, do_unlink=True)
 
 for obj in quadrant_objs:
