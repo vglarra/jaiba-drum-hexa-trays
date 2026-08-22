@@ -244,6 +244,34 @@ def compute_boundary_offset_map(grid_tiles, offset_distance, shift_x=0.0):
     dangling_verts = {v for (v, _, _) in fallback_verts}
     return offset_map, dangling_verts
 
+# GLOBAL (unsplit, all 16 tiles) boundary offsets, computed once. At a
+# vertex right at the split line, a per-half offset map only ever sees ONE
+# of the two true-exterior edges that actually meet there (the other one
+# belongs to a tile that lives in the OTHER plate's mesh) -- it falls back
+# to a single-edge normal instead of a proper two-edge miter. The LEFT and
+# RIGHT plates then each compute a different, independently-wrong offset
+# at what should be the exact same point, which is what shows up as a
+# mismatched notch/sliver where the two plates' walls meet once joined
+# (see JOIN_PLATES). Using the full, unsplit grid here means both edges
+# at that vertex are visible to the SAME miter calculation, so both
+# plates end up using the identical, correctly-mitered point.
+print("\nComputing GLOBAL (unsplit) boundary offsets for continuous wall miters across the split line...")
+GLOBAL_PERIM_OFFSET, _ = compute_boundary_offset_map(grid_orig, PERIMETER_THICKNESS, shift_x=0.0)
+GLOBAL_WALL_OFFSET, _ = compute_boundary_offset_map(grid_orig, PERIMETER_THICKNESS + WALL_WIDTH, shift_x=0.0)
+print("=" * 60)
+
+def globalize_offset_map(local_map, global_map, shift_x):
+    """Overrides each local (per-half) offset value with its globally-
+    mitered equivalent where one exists, shifted into this half's local
+    coordinate space. See the comment above GLOBAL_PERIM_OFFSET."""
+    out = dict(local_map)
+    for k in local_map:
+        gk = (round(k[0] - shift_x, 3), k[1])
+        if gk in global_map:
+            gx, gy = global_map[gk]
+            out[k] = (gx + shift_x, gy)
+    return out
+
 def build_plate_body(grid_tiles, solid_name, shift_x=0.0):
     """Builds the flat hex tiles, the PERIMETER_THICKNESS contour, the
     WALL_WIDTH wall, and the raised inner sensor platform, via bmesh face
@@ -277,6 +305,8 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0):
 
     perim_offset, dangling_verts = compute_boundary_offset_map(grid_tiles, PERIMETER_THICKNESS, shift_x)
     wall_outer_offset, _ = compute_boundary_offset_map(grid_tiles, PERIMETER_THICKNESS + WALL_WIDTH, shift_x)
+    perim_offset = globalize_offset_map(perim_offset, GLOBAL_PERIM_OFFSET, shift_x)
+    wall_outer_offset = globalize_offset_map(wall_outer_offset, GLOBAL_WALL_OFFSET, shift_x)
 
     # Tile top (Z1): only the RING between the 84mm outer boundary and the
     # 78mm platform boundary — not a solid hex. A solid top face here would
