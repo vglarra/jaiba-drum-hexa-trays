@@ -59,11 +59,19 @@ WIRE_HOLE_ANGLE = 180
 # offset in Y instead. This hex's flat (non-tapering) vertical edges run
 # +-S*sin(30) = +-24.2mm off each row's centerline, so ROD_HOLE_Y_OFFSET
 # just needs to clear WIRE_HOLE_RADIUS (6mm) while staying inside that
-# band -- 15mm leaves ~5.5mm clearance from the wire holes and ~5.7mm
-# clearance from where the hex starts tapering.
+# band.
 ROD_HOLE_DIAMETER = 7.0
 ROD_HOLE_RADIUS = ROD_HOLE_DIAMETER / 2.0
-ROD_HOLE_Y_OFFSET = 15.0            # X_L02-R04 (unchanged)
+ROD_HOLE_Y_OFFSET = 20.0            # X_L02-R04, moved 5mm further towards
+                                     # Y+ from the original +15 position to
+                                     # open up more clearance from the
+                                     # wire-routing canal below it (canal
+                                     # edge to rod edge went from ~1mm to
+                                     # ~6mm). ~10.5mm clearance from the
+                                     # wire holes, ~0.75mm clearance to
+                                     # where the hex stops being flat-sided
+                                     # (band is +-24.2mm) -- tight; verify
+                                     # visually before printing.
 ROD_HOLE_Y_OFFSET_L04_R06 = -20.0   # X_L04-R06, moved 35mm towards Y- from
                                      # the +15 position -- puts it on the
                                      # other side of the row centerline
@@ -97,6 +105,32 @@ ROD_HOLE_Z_Y_AXIS = 3.0 * PLATE_H / 4.0  # 15.0mm
 # rod radius) minimum needed.
 ROD_HOLE_X_LEFT = -HEX_FLAT_WIDTH
 ROD_HOLE_X_RIGHT = HEX_FLAT_WIDTH  # + GAP_BETWEEN_PLATES applied where it's used
+
+# ---- WIRE-ROUTING CANALS (rear/bottom face) --------------------
+# All 4 rows' wire holes sit on the same Y as their row (WIRE_HOLE_ANGLE
+# points every hole due west of its tile, no Y offset), so a canal cut
+# along a row's centerline passes straight through every wire hole on
+# that row -- no dodging needed here, unlike the rod holes. A blind
+# pocket CANAL_DEPTH deep, cut UP from the bottom face -- but the cutter
+# itself starts a couple mm BELOW Z=0 (like the wire-hole cutter's
+# bottom=-2.0), not exactly at it: a cutter face sitting exactly
+# coplanar with the target's own bottom face is a classic degenerate
+# case for the boolean solver, and was leaving the bottom skin uncut --
+# the canal was only visible in an X/Y cross-section, not as an actual
+# opening from underneath. The couple mm of overrun below the surface
+# guarantees a clean full perforation there.
+CANAL_WIDTH = 15.0
+CANAL_DEPTH = 10.0
+CANAL_Z_START = -2.0
+CANAL_Z_END = CANAL_DEPTH
+CANAL_LEFT_X = -1000.0   # generous overrun -- perforates the LEFT outer
+                          # wall so the 4 canals all "meet" on the L00-L06
+                          # side, per the ask
+CANAL_RIGHT_MARGIN = WIRE_HOLE_RADIUS + 2.0  # canal's right end stops
+                                              # just past the R01/R04/R06/
+                                              # R08 hole -- it "starts"
+                                              # there, doesn't cut further
+                                              # right through that wall
 
 # ---- Direction mapping --------------------
 DIRECTION_NAMES = {
@@ -629,6 +663,39 @@ def make_rod_hole_cutter_y(name, x_center, z_center, length=2000.0):
     obj.location=Vector((x_center, 0.0, z_center))
     return obj
 
+def make_canal_cutter(name, x_start, x_end, y_center, z_start, z_end):
+    """Rectangular wire-routing canal: a box from x_start..x_end in X,
+    y_center +- CANAL_WIDTH/2 in Y, z_start..z_end in Z. Built directly in
+    world coordinates (no obj.location offset), so no apply_transforms
+    call is needed before using it as a boolean cutter."""
+    print(f"    Canal X={x_start:.3f}..{x_end:.3f}, Y={y_center:.3f} (width {CANAL_WIDTH:.1f}mm), "
+          f"Z={z_start:.1f}..{z_end:.1f}mm")
+    half_w = CANAL_WIDTH / 2.0
+    corners = [
+        (x_start, y_center - half_w),
+        (x_end,   y_center - half_w),
+        (x_end,   y_center + half_w),
+        (x_start, y_center + half_w),
+    ]
+
+    mesh=bpy.data.meshes.new(name+"_mesh")
+    obj=bpy.data.objects.new(name,mesh)
+    bpy.context.collection.objects.link(obj)
+    bm=bmesh.new()
+    bv=[bm.verts.new((x,y,z_start)) for x,y in corners]
+    tv=[bm.verts.new((x,y,z_end)) for x,y in corners]
+    n=len(corners)
+    for i in range(n):
+        j=(i+1)%n
+        bm.faces.new([bv[i],bv[j],tv[j],tv[i]])
+    bm.faces.new(list(reversed(bv)))
+    bm.faces.new(tv)
+    bm.normal_update()
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.validate()
+    return obj
+
 def apply_transforms(obj):
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
@@ -816,6 +883,41 @@ for label, col_x, objs in ROD_HOLE_COLUMNS:
     apply_transforms(cutter)
     for obj in objs:
         safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
+    bpy.data.objects.remove(cutter, do_unlink=True)
+
+# ---- Wire-routing canals (rear/bottom face) ----
+# One canal per row, connecting every wire hole on that row so sensor
+# wiring can be routed horizontally along the back of the plate instead
+# of only dropping straight down. Each canal starts right at its row's
+# rightmost hole (R01/R04/R06/R08) and runs left through every other
+# hole in the row, out past the leftmost hole (L00/L02/L04/L06) and
+# through the LEFT outer wall, so all 4 canals meet on the L00-L06 side.
+print(f"\n{'='*60}")
+print("Cutting wire-routing canals")
+print(f"{'='*60}")
+
+def _find_tile(tiles, tag):
+    for t, cx, cy in tiles:
+        if t == tag:
+            return cx, cy
+    raise KeyError(tag)
+
+CANAL_ROWS = [
+    ("Canal_L00-R01", tl_tiles, tr_tiles, 'L00', 'R01', [tl_obj, tr_obj]),
+    ("Canal_L02-R04", tl_tiles, tr_tiles, 'L02', 'R04', [tl_obj, tr_obj]),
+    ("Canal_L04-R06", bl_tiles, br_tiles, 'L04', 'R06', [bl_obj, br_obj]),
+    ("Canal_L06-R08", bl_tiles, br_tiles, 'L06', 'R08', [bl_obj, br_obj]),
+]
+for label, left_tiles, right_tiles, left_tag, right_tag, objs in CANAL_ROWS:
+    _, row_cy = _find_tile(left_tiles, left_tag)
+    right_cx, _ = _find_tile(right_tiles, right_tag)
+    right_wire_x = right_cx - HOLE_RADIUS  # matches get_hole_position(angle=180)
+    canal_x_end = right_wire_x + CANAL_RIGHT_MARGIN
+    print(f"\n  {label} (row Y={row_cy:.3f})...")
+    cutter = make_canal_cutter(f"Hole_{label}", CANAL_LEFT_X, canal_x_end, row_cy,
+                                CANAL_Z_START, CANAL_Z_END)
+    for obj in objs:
+        safe_cut(f"{label} on {obj.name}", obj, cutter, primary='EXACT')
     bpy.data.objects.remove(cutter, do_unlink=True)
 
 # Force a full dependency-graph/viewport refresh — belt-and-suspenders
