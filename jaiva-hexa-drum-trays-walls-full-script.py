@@ -30,35 +30,25 @@ WALL_HEIGHT = 26.0
 # Per your corrected spec: 15mm TOTAL from the raw hex tip to the outer
 # edge of the new reinforcement — NOT a filled rectangle, NOT 50mm. The
 # existing wall already reaches PERIMETER_THICKNESS+WALL_WIDTH=9mm from
-# the tip, so the genuinely NEW material is only 15-9=6mm thick. A small
-# RAIL_UNION_OVERLAP reaches back INTO the existing wall's own 9mm
-# thickness just enough for a clean union (not deep into the tile, never
-# anywhere near the 78mm sensor platform). Built as the LAST step in the
-# whole script, after every existing rod hole and canal — so those all
-# run against completely unchanged geometry, exactly as before.
-RAIL_TOTAL_FROM_TIP = 15.0   # rail depth reduced (was 25). With
-                              # _EXISTING_WALL_FROM_TIP=9 and
-                              # RAIL_UNION_OVERLAP=2, the rail box's inner
-                              # face is at tip+7, so the box itself is now
-                              # only 15-7=8mm deep -- barely wider than
-                              # the 7mm rod.
-RAIL_UNION_OVERLAP = 2.0     # mm reaching into the existing wall's own
-                               # thickness, just for a safe union — not
-                               # a deep fill, nowhere near the platform
+# the tip, so the genuinely NEW material is only 15-9=6mm thick at a
+# peak (deeper at the valleys, where the wall's own zigzag surface
+# falls back well short of 9mm). Each rail is merged directly into its
+# quadrant's own mesh (not built as a separate solid and boolean-
+# unioned in) -- see merge_rail_into_wall below. Built as the LAST
+# step in the whole script, after every existing rod hole and canal —
+# so those all run against completely unchanged geometry, exactly as
+# before.
+RAIL_TOTAL_FROM_TIP = 15.0
 RAIL_ROD_OFFSET_FROM_OUTER = 4.3   # rod sits this far IN from the rail's
-                                    # true outer edge -- i.e. close to the
-                                    # INNER face (tip+7), the seam where
-                                    # the rail intersects the existing
-                                    # wall coming off the hex tip, per your
-                                    # ask. With the box now only 8mm deep,
-                                    # "fully inside both faces" only
-                                    # spans offset 3.5-4.5mm at all -- 4.3
-                                    # leaves ~0.2mm to the inner face and
-                                    # ~0.8mm to the outer face. That's as
-                                    # close to the tip-side intersection
-                                    # as the rod can get without actually
-                                    # touching either face; there is very
-                                    # little room to spare at this depth.
+                                    # true outer edge (y_outer). Kept
+                                    # clear of a peak's own reach (a
+                                    # peak's wall surface sits ~10.4mm
+                                    # from the tip, so the rod's 3.5mm
+                                    # radius around offset 4.3 stays
+                                    # safely within the 15mm-from-tip
+                                    # material there) without sitting
+                                    # so far in that it nears the
+                                    # sensor platform at a valley.
 RAIL_ROD_Z = (PLATE_H + WALL_HEIGHT) - 10.0   # the rail's own rod moves up
                                                 # toward the TOP of the rail
                                                 # (Z+) instead of sharing the
@@ -367,9 +357,18 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0, shift_y=0.0):
         itop = [gv(x, y, z_inner) for x, y in inner_corners]
         try: bm.faces.new(itop)
         except ValueError as e: print(f"  ⚠ inner top FAILED at ({cx:.1f},{cy:.1f}): {e}")
-        ibot = [gv(x, y, z1) for x, y in inner_corners]
-        try: bm.faces.new(list(reversed(ibot)))
-        except ValueError as e: print(f"  ⚠ inner bottom FAILED at ({cx:.1f},{cy:.1f}): {e}")
+        # No cap at z1 (INNER_TILE_WIDTH boundary) here on purpose: the
+        # platform sits directly on top of solid base-plate material
+        # (the base plate's own z1 surface is already fully closed by
+        # the outer-hex-to-inner-platform "shelf" faces below), so this
+        # boundary is a place where material continues upward through
+        # inner_side, not a real surface needing its own cap. Building
+        # one anyway created a genuine 3-faces-per-edge non-manifold
+        # ring around every single platform, in every quadrant, since
+        # the very first build -- confirmed by the fact that every
+        # quadrant's very first "N non-manifold edges" report (right
+        # after build_plate_body, before any cuts) exactly equals
+        # tile_count * 6 (the six inner-platform edges per tile).
         for i in range(6):
             j = (i + 1) % 6
             ib0 = gv(inner_corners[i][0], inner_corners[i][1], z1)
@@ -681,72 +680,6 @@ def safe_cut(label, target, cutter, primary='EXACT'):
         print(f"    ✓ {label} cut cleanly with {best_solver}")
     return True
 
-def make_box_solid(name, x0, x1, y0, y1, z0, z1):
-    mesh = bpy.data.meshes.new(name+"_mesh"); obj = bpy.data.objects.new(name, mesh)
-    bpy.context.collection.objects.link(obj)
-    bm = bmesh.new()
-    corners = [(x0,y0,z0),(x1,y0,z0),(x1,y1,z0),(x0,y1,z0),
-               (x0,y0,z1),(x1,y0,z1),(x1,y1,z1),(x0,y1,z1)]
-    bv = [bm.verts.new(c) for c in corners]
-    for fi in [[0,3,2,1],[4,5,6,7],[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7]]:
-        bm.faces.new([bv[i] for i in fi])
-    bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
-    return obj
-
-def safe_union(label, target, addition, primary='EXACT'):
-    print(f"    Unioning {label}...")
-    def try_union(solver):
-        """Same distinction as try_cut_on_copy: the delta only says
-        whether THIS union made things worse, not whether the result is
-        actually clean -- returns the absolute final counts too, which
-        is what safe_union below picks/reports on."""
-        nm0, za0 = report_manifold_stats(target)
-        dup = duplicate_obj(target, target.name + "_TRYU")
-        bpy.ops.object.select_all(action='DESELECT')
-        dup.select_set(True); bpy.context.view_layer.objects.active = dup
-        mod = dup.modifiers.new("Union", 'BOOLEAN')
-        mod.operation = 'UNION'; mod.object = addition; mod.solver = solver
-        try:
-            bpy.ops.object.modifier_apply(modifier="Union")
-        except Exception as e:
-            print(f"      failed ({solver}): {e}")
-            try: dup.modifiers.remove(mod)
-            except: pass
-            bpy.data.objects.remove(dup, do_unlink=True)
-            return False, None, None, None, None, None
-        nm1, za1 = report_manifold_stats(dup)
-        print(f"      {solver}: non-manifold edges: {nm1-nm0} (total now {nm1}), "
-              f"zero-area faces: {za1-za0} (total now {za1})")
-        return True, nm1 - nm0, za1 - za0, dup, nm1, za1
-
-    ok1, _, _, dup1, nm1, za1 = try_union(primary)
-    alt = 'FLOAT' if primary == 'EXACT' else 'EXACT'
-    if ok1 and nm1 == 0 and za1 == 0:
-        target.data = dup1.data
-        bpy.data.objects.remove(dup1, do_unlink=True)
-        print(f"    ✓ {label} unioned cleanly with {primary}")
-        return True
-    ok2, _, _, dup2, nm2, za2 = try_union(alt)
-    candidates = []
-    if ok1: candidates.append((nm1 + za1, primary, dup1, nm1, za1))
-    if ok2: candidates.append((nm2 + za2, alt, dup2, nm2, za2))
-    if not candidates:
-        print(f"    ⚠ {label}: both solvers failed — rail NOT attached")
-        return False
-    candidates.sort(key=lambda c: c[0])
-    best_score, best_solver, best_dup, best_nm, best_za = candidates[0]
-    target.data = best_dup.data
-    for _, _, d, _, _ in candidates:
-        if d is not best_dup:
-            bpy.data.objects.remove(d, do_unlink=True)
-    bpy.data.objects.remove(best_dup, do_unlink=True)
-    if best_score > 0:
-        print(f"    ⚠ {label}: cleanest available ({best_solver}) still has "
-              f"{best_nm} non-manifold edges, {best_za} zero-area faces")
-    else:
-        print(f"    ✓ {label} unioned cleanly with {best_solver}")
-    return True
-
 def add_tile_label(label, cx, cy):
     bpy.ops.object.text_add(location=(cx, cy, PLATE_H + WALL_HEIGHT + 1.0))
     txt = bpy.context.active_object
@@ -916,36 +849,211 @@ TOP_RAIL_X1 = _wall_outer_extreme_x(*_top_right_tile, [30, 330], max)
 BOTTOM_RAIL_X0 = _wall_outer_extreme_x(*_bottom_left_tile, [150, 210], min)
 BOTTOM_RAIL_X1 = _wall_outer_extreme_x(*_bottom_right_tile, [30, 330], max)
 
-_EXISTING_WALL_FROM_TIP = PERIMETER_THICKNESS + WALL_WIDTH   # 9.0mm
-
 TOP_RAIL_Y_OUTER = TOP_TIP_Y + RAIL_TOTAL_FROM_TIP                                    # tip+15
-TOP_RAIL_Y_INNER = TOP_TIP_Y + _EXISTING_WALL_FROM_TIP - RAIL_UNION_OVERLAP           # tip+7
 BOTTOM_RAIL_Y_OUTER = BOTTOM_TIP_Y - RAIL_TOTAL_FROM_TIP                              # tip-15
-BOTTOM_RAIL_Y_INNER = BOTTOM_TIP_Y - _EXISTING_WALL_FROM_TIP + RAIL_UNION_OVERLAP     # tip-7
 
 RAIL_ROD_Y_TOP = TOP_RAIL_Y_OUTER - RAIL_ROD_OFFSET_FROM_OUTER
 RAIL_ROD_Y_BOTTOM = BOTTOM_RAIL_Y_OUTER + RAIL_ROD_OFFSET_FROM_OUTER
 
 print(f"Top rail: X {TOP_RAIL_X0:.1f}..{TOP_RAIL_X1:.1f}, tip Y={TOP_TIP_Y:.1f}, "
-      f"box Y {TOP_RAIL_Y_INNER:.1f}..{TOP_RAIL_Y_OUTER:.1f}, rod Y={RAIL_ROD_Y_TOP:.1f}")
+      f"y_outer={TOP_RAIL_Y_OUTER:.1f}, rod Y={RAIL_ROD_Y_TOP:.1f}")
 print(f"Bottom rail: X {BOTTOM_RAIL_X0:.1f}..{BOTTOM_RAIL_X1:.1f}, tip Y={BOTTOM_TIP_Y:.1f}, "
-      f"box Y {BOTTOM_RAIL_Y_OUTER:.1f}..{BOTTOM_RAIL_Y_INNER:.1f}, rod Y={RAIL_ROD_Y_BOTTOM:.1f}")
+      f"y_outer={BOTTOM_RAIL_Y_OUTER:.1f}, rod Y={RAIL_ROD_Y_BOTTOM:.1f}")
+
+# ---- Attach each rail by merging its geometry DIRECTLY into the
+# quadrant's own mesh -- no boolean union at all anymore. Found the
+# real cause of the gap you saw in SuperSlicer (not a shading
+# artifact): my rail's "floor" was built as NEW side-wall faces
+# tracing the wall's own outer surface (Z0 to Z2, along the same
+# GLOBAL_WALL_OFFSET points build_plate_body already used) -- but
+# build_plate_body had ALREADY built those exact same faces when it
+# built the wall in the first place. Two solids with a genuinely
+# duplicate, exactly-coincident face along most of their shared
+# boundary is a textbook case a boolean solver can resolve wrong,
+# which is exactly what a slicer would then read as an open/unclear
+# region rather than solid. Rather than tune the overlap depth again,
+# the fix is to never build that duplicate face at all: merge only
+# the rail's genuinely NEW geometry (the flat outer roof, the two end
+# caps down to the wall's true surface, and the top/bottom caps) into
+# the wall's EXISTING mesh, and let bmesh's own vertex welding
+# (remove_doubles) stitch the new geometry to the wall's pre-existing
+# side faces wherever they share a vertex position exactly -- which
+# is everywhere along the chain now, since the whole chain is built
+# straight from GLOBAL_WALL_OFFSET (the wall's own true surface) with
+# no separate "overlap into the wall" offset needed any more (there's
+# no boolean left for an epsilon to help).
+
+def _row_offset_chain(row_tiles, tip_angle, left_angle, right_angle, offset_map):
+    """Ordered (west-to-east) chain of a row's top/bottom silhouette
+    points -- for each tile: its west corner, its own tip, its east
+    corner -- run through `offset_map`'s miter, with consecutive shared
+    corners (two tiles' common valley vertex) de-duplicated. Each
+    point is tagged with its owning tile's cx: once split at SPLIT_X,
+    that tag is what tells merge_rail_into_wall whether a given floor
+    segment's wall face already exists in THIS quadrant's own mesh
+    (owner on this quadrant's side) or in the other one entirely
+    (owner across SPLIT_X, e.g. R07 for BottomRail_L -- BL never
+    builds R07's wall at all, so nothing exists there to hand off)."""
+    chain = []
+    for (cx, cy) in sorted(row_tiles, key=lambda t: t[0]):
+        for a_deg in (left_angle, tip_angle, right_angle):
+            a = math.radians(a_deg)
+            raw = (cx + S * math.cos(a), cy + S * math.sin(a))
+            chain.append((offset_map.get(_vkey(raw), raw), cx))
+    deduped = []
+    for p, owner in chain:
+        if deduped and _vkey(deduped[-1][0]) == _vkey(p):
+            continue
+        deduped.append((p, owner))
+    return deduped
+
+def _split_chain_at_x(chain, split_x):
+    """Splits an ordered west-to-east chain of (point, owner_cx) pairs
+    into (left, right) at X=split_x, interpolating a crossing point
+    (tagged owner=None -- belongs to neither side's own tiles) if
+    split_x falls mid-segment rather than exactly on a chain vertex --
+    so both halves meet exactly at split_x, same as the rail's own X
+    boundary between quadrants."""
+    left, right = [], []
+    for i, (p, owner) in enumerate(chain):
+        if p[0] <= split_x:
+            left.append((p, owner))
+        if p[0] >= split_x:
+            right.append((p, owner))
+        if i + 1 < len(chain):
+            p0, _ = chain[i]
+            p1, _ = chain[i + 1]
+            if (p0[0] < split_x < p1[0]) or (p1[0] < split_x < p0[0]):
+                t = (split_x - p0[0]) / (p1[0] - p0[0])
+                cross = (split_x, p0[1] + t * (p1[1] - p0[1]))
+                left.append((cross, None))
+                right.append((cross, None))
+    return left, right
+
+def _find_and_delete_face_at(bm, positions):
+    """Deletes the first face in `bm` whose vertices sit exactly (to
+    0.001mm) at `positions` (any order), if one exists. Used to remove
+    a quadrant's own now-obsolete wall-outer face once rail material
+    extends past it -- see merge_rail_into_wall."""
+    target = frozenset(_vkey3(p) for p in positions)
+    for f in bm.faces:
+        if len(f.verts) != len(positions):
+            continue
+        if frozenset(_vkey3(v.co) for v in f.verts) == target:
+            bmesh.ops.delete(bm, geom=[f], context='FACES')
+            return True
+    return False
+
+def _vkey3(p):
+    return (round(p[0], 3), round(p[1], 3), round(p[2], 3))
+
+def merge_rail_into_wall(label, target_obj, x0, x1, y_outer, chain, is_top,
+                          z0, z1, shift_x, shift_y, is_local_owner):
+    """Adds the rail's NEW material directly into target_obj's own
+    mesh -- no boolean union, no separate rail object at all. The
+    silhouette is the flat outer roof plus the chain tracing the
+    wall's true surface, closing into one simple polygon.
+
+    Every "floor" segment (both endpoints on the chain, not the roof)
+    corresponds to a vertical face that ALREADY exists somewhere as
+    part of the wall's own exterior geometry, built by build_plate_body
+    from these same two consecutive hex-corner angles -- but WHICH
+    quadrant's mesh it lives in depends on which tile actually owns
+    that edge (`is_local_owner`, using each point's tagged owner_cx
+    from _row_offset_chain/_split_chain_at_x):
+      - owner tile is in THIS quadrant: that exact wall-outer face is
+        already sitting in target_obj's own mesh. It's now purely
+        internal (rail material continues past it), so it gets found
+        and DELETED here rather than building a second, duplicate
+        face on top of it -- confirmed as the real cause of the gap
+        found in the sliced STL (two solids with a genuinely
+        duplicate, exactly-coincident face along their shared
+        boundary is a case a boolean solver can resolve wrong; even
+        merged directly as one mesh, a duplicate face is still wrong).
+      - owner tile is in the OTHER quadrant (e.g. R07 for
+        BottomRail_L): target_obj's mesh never had a face there at
+        all, so a brand new side wall gets built, same as for the
+        roof/end-cap segments.
+    remove_doubles then welds every new vertex that lands exactly on
+    an existing wall vertex -- which is every chain point, since the
+    whole chain comes straight from GLOBAL_WALL_OFFSET, the wall's
+    own true surface."""
+    roof = [((x0, y_outer), True, None), ((x1, y_outer), True, None)]
+    body = [(p, False, owner) for p, owner in reversed(chain)]
+    pts = roof + body
+    if is_top:
+        pts = list(reversed(pts))
+    pts = [((x + shift_x, y + shift_y), is_roof, owner) for (x, y), is_roof, owner in pts]
+
+    bm = bmesh.new()
+    bm.from_mesh(target_obj.data)
+    vmap = {}
+    def gv(x, y, z):
+        k = (round(x, 3), round(y, 3), round(z, 3))
+        if k not in vmap:
+            vmap[k] = bm.verts.new((x, y, z))
+        return vmap[k]
+
+    n = len(pts)
+    bv = [gv(p[0], p[1], z0) for p, _, _ in pts]
+    tv = [gv(p[0], p[1], z1) for p, _, _ in pts]
+    try: bm.faces.new(list(reversed(bv)))
+    except ValueError: pass
+    try: bm.faces.new(tv)
+    except ValueError: pass
+    deleted = 0
+    for k in range(n):
+        kk = (k + 1) % n
+        is_roof_k, is_roof_kk = pts[k][1], pts[kk][1]
+        if is_roof_k or is_roof_kk:
+            try: bm.faces.new([bv[k], bv[kk], tv[kk], tv[k]])
+            except ValueError: pass
+            continue
+        owner = pts[k][2] if pts[k][2] is not None else pts[kk][2]
+        if owner is not None and is_local_owner(owner):
+            positions = [
+                (bv[k].co.x, bv[k].co.y, z0), (bv[kk].co.x, bv[kk].co.y, z0),
+                (bv[kk].co.x, bv[kk].co.y, z1), (bv[k].co.x, bv[k].co.y, z1),
+            ]
+            if _find_and_delete_face_at(bm, positions):
+                deleted += 1
+        else:
+            try: bm.faces.new([bv[k], bv[kk], tv[kk], tv[k]])
+            except ValueError: pass
+
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.001)
+    bm.normal_update()
+    bm.to_mesh(target_obj.data)
+    bm.free()
+    target_obj.data.update()
+
+    nm, za = report_manifold_stats(target_obj)
+    print(f"  {label}: merged directly into {target_obj.name} (no boolean, "
+          f"{deleted} obsolete wall face(s) replaced) -- "
+          f"non-manifold edges: {nm}, zero-area faces: {za}")
+
+TOP_FULL_CHAIN = _row_offset_chain(TOP_ROW_TILES, 90, 150, 30, GLOBAL_WALL_OFFSET)
+BOTTOM_FULL_CHAIN = _row_offset_chain(BOTTOM_ROW_TILES, 270, 210, 330, GLOBAL_WALL_OFFSET)
+TOP_CHAIN_L, TOP_CHAIN_R = _split_chain_at_x(TOP_FULL_CHAIN, SPLIT_X)
+BOTTOM_CHAIN_L, BOTTOM_CHAIN_R = _split_chain_at_x(BOTTOM_FULL_CHAIN, SPLIT_X)
+
+_is_left = lambda owner_cx: owner_cx < SPLIT_X
+_is_right = lambda owner_cx: owner_cx >= SPLIT_X
 
 RAIL_SPECS = [
-    ("TopRail_L", TOP_RAIL_X0, SPLIT_X,
-     TOP_RAIL_Y_INNER + ROW_SPLIT_MARGIN, TOP_RAIL_Y_OUTER + ROW_SPLIT_MARGIN, tl_obj),
-    ("TopRail_R", SPLIT_X + GAP_BETWEEN_PLATES, TOP_RAIL_X1 + GAP_BETWEEN_PLATES,
-     TOP_RAIL_Y_INNER + ROW_SPLIT_MARGIN, TOP_RAIL_Y_OUTER + ROW_SPLIT_MARGIN, tr_obj),
-    ("BottomRail_L", BOTTOM_RAIL_X0, SPLIT_X,
-     BOTTOM_RAIL_Y_OUTER - ROW_SPLIT_MARGIN, BOTTOM_RAIL_Y_INNER - ROW_SPLIT_MARGIN, bl_obj),
-    ("BottomRail_R", SPLIT_X + GAP_BETWEEN_PLATES, BOTTOM_RAIL_X1 + GAP_BETWEEN_PLATES,
-     BOTTOM_RAIL_Y_OUTER - ROW_SPLIT_MARGIN, BOTTOM_RAIL_Y_INNER - ROW_SPLIT_MARGIN, br_obj),
+    ("TopRail_L", TOP_RAIL_X0, SPLIT_X, TOP_RAIL_Y_OUTER, TOP_CHAIN_L,
+     True, 0.0, ROW_SPLIT_MARGIN, tl_obj, _is_left),
+    ("TopRail_R", SPLIT_X, TOP_RAIL_X1, TOP_RAIL_Y_OUTER, TOP_CHAIN_R,
+     True, GAP_BETWEEN_PLATES, ROW_SPLIT_MARGIN, tr_obj, _is_right),
+    ("BottomRail_L", BOTTOM_RAIL_X0, SPLIT_X, BOTTOM_RAIL_Y_OUTER, BOTTOM_CHAIN_L,
+     False, 0.0, -ROW_SPLIT_MARGIN, bl_obj, _is_left),
+    ("BottomRail_R", SPLIT_X, BOTTOM_RAIL_X1, BOTTOM_RAIL_Y_OUTER, BOTTOM_CHAIN_R,
+     False, GAP_BETWEEN_PLATES, -ROW_SPLIT_MARGIN, br_obj, _is_right),
 ]
-for label, x0, x1, y0, y1, obj in RAIL_SPECS:
-    print(f"\n  {label}: X {x0:.1f}..{x1:.1f}, Y {y0:.1f}..{y1:.1f}")
-    rail = make_box_solid(f"Cut_{label}", x0, x1, y0, y1, 0.0, PLATE_H + WALL_HEIGHT)
-    safe_union(label, obj, rail)
-    bpy.data.objects.remove(rail, do_unlink=True)
+for label, x0, x1, y_outer, chain, is_top, shift_x, shift_y, obj, is_local_owner in RAIL_SPECS:
+    print(f"\n  {label}: X {x0:.1f}..{x1:.1f}, y_outer={y_outer:.1f}")
+    merge_rail_into_wall(label, obj, x0, x1, y_outer, chain, is_top,
+                          0.0, PLATE_H + WALL_HEIGHT, shift_x, shift_y, is_local_owner)
 
 print(f"\n{'='*60}")
 print("Drilling X-axis rod holes through the new top/bottom rails")
@@ -956,7 +1064,13 @@ RAIL_ROD_ROWS = [
 ]
 for label, rod_y, objs in RAIL_ROD_ROWS:
     print(f"\n  Rod hole {label} (Y={rod_y:.3f}, Z={RAIL_ROD_Z:.1f})...")
-    cutter = make_rod_hole_cutter(f"Hole_Rod_{label}", rod_y, RAIL_ROD_Z)
+    # Shorter than the default 2000mm cutter used everywhere else --
+    # the rail itself only spans up to TOP_RAIL_X0..X1 (-177..177), so
+    # a 2000mm-long cylinder is mostly extraneous far-flung geometry
+    # for the solver to process near the fragile L06/R07 split corner
+    # where the bottom rod hole was leaking/failing. 500mm (250mm each
+    # side of X=0) still clears the widest rail (177mm) by 73mm.
+    cutter = make_rod_hole_cutter(f"Hole_Rod_{label}", rod_y, RAIL_ROD_Z, length=500.0)
     apply_transforms(cutter)
     for obj in objs:
         safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
