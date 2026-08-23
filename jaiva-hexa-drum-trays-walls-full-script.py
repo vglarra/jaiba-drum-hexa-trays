@@ -57,7 +57,8 @@ RAIL_ROD_OFFSET_FROM_OUTER = 7.3   # rod sits this far IN from the rail's
 RAIL_ROD_Z = (PLATE_H + WALL_HEIGHT) - 10.0   # the rail's own rod moves up
                                                 # toward the TOP of the rail
                                                 # (Z+) instead of sharing the
-                                                # base plate's rod Z (5mm) --
+                                                # base plate's rod Z (see
+                                                # ROD_HOLE_Z_X_AXIS below) --
                                                 # both TopRail and BottomRail
                                                 # rod centers sit 10mm below
                                                 # the rail's top surface
@@ -74,14 +75,28 @@ WIRE_HOLE_DIAMETER = 12.0
 WIRE_HOLE_RADIUS = WIRE_HOLE_DIAMETER / 2.0
 WIRE_HOLE_ANGLE = 180
 
-# ---- THREADED ROD HOLES (unite the 4 quadrant plates) — UNCHANGED, same
-# positions as before, not touched by this update at all --------------
+# ---- THREADED ROD HOLES (unite the 4 quadrant plates) --------------
 ROD_HOLE_DIAMETER = 7.0
 ROD_HOLE_RADIUS = ROD_HOLE_DIAMETER / 2.0
 ROD_HOLE_Y_OFFSET = 20.0
 ROD_HOLE_Y_OFFSET_L04_R06 = -20.0
-ROD_HOLE_Z_X_AXIS = PLATE_H / 4.0
-ROD_HOLE_Z_Y_AXIS = 3.0 * PLATE_H / 4.0
+ROD_HOLE_Z_Y_AXIS = 3.0 * PLATE_H / 4.0   # 15.0mm -- unchanged, the fixed
+                                            # reference the X-axis rod Z
+                                            # below is measured against.
+# The X-axis and Y-axis rod centerlines are perpendicular, horizontal
+# skew lines (directions (1,0,0) and (0,1,0)) at different Z -- for that
+# specific geometry the minimum distance between the two lines is
+# ALWAYS exactly |ROD_HOLE_Z_Y_AXIS - ROD_HOLE_Z_X_AXIS| regardless of
+# their X/Y offsets (the cross product of the two directions is purely
+# vertical, so the offset terms drop out of the distance formula). The
+# two 7mm-diameter rods become tangent (their outer surfaces touch) when
+# that Z gap equals the sum of their radii, i.e. one full diameter:
+# ROD_HOLE_Z_Y_AXIS - ROD_HOLE_DIAMETER. Backing off 1mm further from
+# that tangent point (per your ask) gives a real 1mm surface gap instead
+# of a knife-edge touch, and moving the X-axis rod up to reach it also
+# fixes it sitting only 1.5mm clear of Z=0 at the old PLATE_H/4 -- the
+# new position clears Z=0 by 3.5mm instead.
+ROD_HOLE_Z_X_AXIS = ROD_HOLE_Z_Y_AXIS - ROD_HOLE_DIAMETER - 1.0   # 7.0mm
 ROD_HOLE_X_LEFT = -HEX_FLAT_WIDTH
 ROD_HOLE_X_RIGHT = HEX_FLAT_WIDTH
 
