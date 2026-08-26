@@ -464,7 +464,15 @@ def build_plate_body(grid_tiles, solid_name, shift_x=0.0, shift_y=0.0):
     bm.normal_update()
     bm.to_mesh(mesh)
     bm.free()
-    mesh.validate()
+    # verbose=True prints exactly what mesh.validate() finds/fixes (duplicate
+    # faces, invalid loops, etc) to the console -- silently swallowing that
+    # info (the previous bare mesh.validate()) meant a genuinely broken
+    # build could get "corrected" here without ever showing up in the log,
+    # which is exactly the kind of thing that could explain TR/BR-only
+    # boolean failures further downstream while TL/BL's log looks identical.
+    was_invalid = mesh.validate(verbose=True)
+    if was_invalid:
+        print(f"  ⚠ {solid_name}: mesh.validate() found and corrected invalid geometry (see warnings above)")
     mesh.update()
 
     nm, za = report_manifold_stats(obj)
@@ -614,6 +622,49 @@ def report_manifold_stats(obj):
     bm.free()
     return nonmanifold, zero_area
 
+def report_self_intersections(obj):
+    """Finds pairs of faces that geometrically overlap in 3D space
+    without sharing a vertex -- i.e. the mesh crosses through itself.
+    A solid can be individually 'clean' by every check above (0
+    non-manifold edges, 0 zero-area faces, validate() finds nothing)
+    and STILL be self-intersecting, since none of those checks look at
+    whether two unrelated faces occupy the same space. A boolean
+    solver's inside/outside classification can go wrong specifically
+    near a self-intersection -- which would explain a DIFFERENCE cut
+    reporting "success" while actually leaving cutter geometry fused
+    into the result, exactly the TR/BR-only symptom seen so far. Only
+    non-adjacent face pairs (no shared vertex) count -- faces that
+    share an edge or corner always technically 'touch' there, that's
+    normal mesh connectivity, not a self-intersection."""
+    from mathutils.bvhtree import BVHTree
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.normal_update()
+    bm.verts.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bvh = BVHTree.FromBMesh(bm, epsilon=0.0)
+    overlaps = bvh.overlap(bvh)
+    bad = set()
+    for i, j in overlaps:
+        if i == j:
+            continue
+        fi, fj = bm.faces[i], bm.faces[j]
+        shared = {v.index for v in fi.verts} & {v.index for v in fj.verts}
+        if shared:
+            continue
+        bad.add(tuple(sorted((i, j))))
+    if bad:
+        print(f"  ⚠ {obj.name}: {len(bad)} self-intersecting face pair(s) found")
+        for i, j in list(bad)[:10]:
+            ci = bm.faces[i].calc_center_median()
+            cj = bm.faces[j].calc_center_median()
+            print(f"      face {i} (center {ci.x:.1f},{ci.y:.1f},{ci.z:.1f}) "
+                  f"x face {j} (center {cj.x:.1f},{cj.y:.1f},{cj.z:.1f})")
+    else:
+        print(f"  {obj.name}: no self-intersecting faces found")
+    bm.free()
+    return len(bad)
+
 def mesh_volume(obj):
     """Actual enclosed volume (mm^3) -- unlike vertex/face counts or the
     non-manifold check, this can't be fooled by a topologically 'clean'
@@ -634,19 +685,19 @@ def duplicate_obj(obj, name):
     bpy.context.collection.objects.link(new_obj)
     return new_obj
 
-def do_diff(target, cutter, solver='EXACT'):
+def do_diff(target, cutter, solver='EXACT', operation='DIFFERENCE'):
     bpy.ops.object.select_all(action='DESELECT')
     target.select_set(True)
     bpy.context.view_layer.objects.active=target
     mod=target.modifiers.new("Diff",'BOOLEAN')
-    mod.operation='DIFFERENCE'
+    mod.operation=operation
     mod.object=cutter
     mod.solver=solver
     try:
         bpy.ops.object.modifier_apply(modifier="Diff")
         return True
     except Exception as e:
-        print(f"      failed ({solver}): {e}")
+        print(f"      failed ({solver} {operation}): {e}")
         try: target.modifiers.remove(mod)
         except: pass
         return False
@@ -657,50 +708,99 @@ def cutter_leaked_into_result(cutter, result_obj):
     result_positions = {(round(v.co.x,3), round(v.co.y,3), round(v.co.z,3))
                          for v in result_obj.data.vertices}
     leaked = cutter_positions & result_positions
-    return len(leaked) > 0, len(leaked)
+    return len(leaked) > 0, len(leaked), leaked
 
-def try_cut_on_copy(target, cutter, solver):
+def try_cut_on_copy(target, cutter, solver, operation='DIFFERENCE'):
     """Returns (ok, delta_nm, delta_za, dup, abs_nm, abs_za) -- the delta
     is relative to `target`'s own state going in, but abs_nm/abs_za are
     the FINAL non-manifold/zero-area counts on the result itself. A
     delta of 0 only means this particular operation didn't make things
     WORSE than whatever `target` already was -- it says nothing about
     whether `target` was already broken. safe_cut below picks/reports
-    based on the absolute counts for that reason."""
+    based on the absolute counts for that reason.
+
+    The cutter_leaked_into_result check only applies to DIFFERENCE: for
+    a UNION, part of the cutter's own geometry legitimately surviving
+    unchanged in the result (whatever portion didn't overlap the
+    target) is the expected, correct outcome, not a sign of failure --
+    so that check is skipped for any other operation."""
     nm0, za0 = report_manifold_stats(target)
     dup = duplicate_obj(target, target.name + "_TRY")
-    ok = do_diff(dup, cutter, solver=solver)
+    ok = do_diff(dup, cutter, solver=solver, operation=operation)
     if not ok:
         bpy.data.objects.remove(dup, do_unlink=True)
         return False, None, None, None, None, None
     nm1, za1 = report_manifold_stats(dup)
-    leaked, leak_count = cutter_leaked_into_result(cutter, dup)
-    if leaked:
-        print(f"      {solver}: boolean reported success but {leak_count} cutter "
-              f"vertices leaked into the result — treating as failed")
-        nm1 = nm0 + 1000
+    if operation == 'DIFFERENCE':
+        leaked, leak_count, leaked_positions = cutter_leaked_into_result(cutter, dup)
+        # A leaked-position match by itself is NOT proof of corruption: a
+        # cutter corner landing deep inside uniform material legitimately
+        # becomes the new cavity's own corner at that exact coordinate --
+        # confirmed on the fit-tab slot cut (SensorBase_TR/BR): after
+        # fixing _extrude_profile_along_y's inward-normal bug, the result
+        # there is genuinely clean (0 non-manifold edges, 0 zero-area
+        # faces, mesh.validate() clean, removed volume matching the
+        # cutter's own volume) yet this check still flagged the exact
+        # same corner as "leaked", because it only compares raw
+        # coordinates. Only escalate to the corruption penalty when the
+        # leak is ACCOMPANIED by a real regression (more non-manifold
+        # edges or zero-area faces than the target already had) -- that
+        # combination is what actually distinguishes a genuinely fused-in
+        # cutter (e.g. the still-unresolved TR/BR canal cuts) from a
+        # clean cut that merely shares a coordinate with the cutter.
+        if leaked and (nm1 > nm0 or za1 > za0):
+            all_cutter_verts = sorted({(round(v.co.x,3), round(v.co.y,3), round(v.co.z,3))
+                                        for v in cutter.data.vertices})
+            print(f"      {solver}: boolean reported success but {leak_count} cutter "
+                  f"vertices leaked into the result — treating as failed")
+            print(f"        leaked positions: {sorted(leaked_positions)}")
+            print(f"        full cutter vertex set (all {len(all_cutter_verts)}): {all_cutter_verts}")
+            nm1 = nm0 + 1000
+        elif leaked:
+            print(f"      {solver}: {leak_count} cutter vertex position(s) coincide with the "
+                  f"result but non-manifold/zero-area counts show no regression — treating as a "
+                  f"clean cut, not corruption")
+            print(f"        coincident positions: {sorted(leaked_positions)}")
     print(f"      {solver}: non-manifold edges: {nm1-nm0} (total now {nm1}), "
           f"zero-area faces: {za1-za0} (total now {za1})")
     return True, nm1 - nm0, za1 - za0, dup, nm1, za1
 
-def safe_cut(label, target, cutter, primary='EXACT'):
-    print(f"    Cutting {label}...")
+def safe_cut(label, target, cutter, primary='EXACT', operation='DIFFERENCE'):
+    verb = "Cutting" if operation == 'DIFFERENCE' else "Unioning"
+    past = "cut" if operation == 'DIFFERENCE' else "unioned"
+    print(f"    {verb} {label}...")
     alt = 'FLOAT' if primary == 'EXACT' else 'EXACT'
-    ok1, _, _, dup1, nm1, za1 = try_cut_on_copy(target, cutter, primary)
+    ok1, _, _, dup1, nm1, za1 = try_cut_on_copy(target, cutter, primary, operation=operation)
     if ok1 and nm1 == 0 and za1 == 0:
         target.data = dup1.data
         bpy.data.objects.remove(dup1, do_unlink=True)
-        print(f"    ✓ {label} cut cleanly with {primary}")
+        print(f"    ✓ {label} {past} cleanly with {primary}")
         return True
-    ok2, _, _, dup2, nm2, za2 = try_cut_on_copy(target, cutter, alt)
+    ok2, _, _, dup2, nm2, za2 = try_cut_on_copy(target, cutter, alt, operation=operation)
     candidates = []
     if ok1: candidates.append((nm1 + za1, primary, dup1, nm1, za1))
     if ok2: candidates.append((nm2 + za2, alt, dup2, nm2, za2))
     if not candidates:
-        print(f"    ⚠ {label}: both solvers failed — material NOT removed")
+        print(f"    ⚠ {label}: both solvers failed — material NOT modified")
         return False
     candidates.sort(key=lambda c: c[0])
     best_score, best_solver, best_dup, best_nm, best_za = candidates[0]
+    # A score >=1000 means every candidate hit the leaked-vertex penalty
+    # (see try_cut_on_copy) -- i.e. every solver produced a result that's
+    # definitionally corrupt (the cutter's own geometry partially fused
+    # in instead of being subtracted/merged), not just "a bit messy".
+    # Previously this still got applied as the "least-bad" option,
+    # which is how a target could end up silently carrying broken
+    # geometry -- visible as something odd in the viewport, but not a
+    # real, sliceable cavity/tab once exported. Refusing to apply here
+    # leaves target exactly as it was (missing this one feature) rather
+    # than corrupting an otherwise-good mesh.
+    if best_score >= 1000:
+        print(f"    ⚠ {label}: every solver produced corrupted geometry "
+              f"(cutter vertices leaked) — material NOT modified")
+        for _, _, d, _, _ in candidates:
+            bpy.data.objects.remove(d, do_unlink=True)
+        return False
     target.data = best_dup.data
     for _, _, d, _, _ in candidates:
         if d is not best_dup:
@@ -710,7 +810,7 @@ def safe_cut(label, target, cutter, primary='EXACT'):
         print(f"    ⚠ {label}: cleanest available ({best_solver}) still has "
               f"{best_nm} non-manifold edges, {best_za} zero-area faces")
     else:
-        print(f"    ✓ {label} cut cleanly with {best_solver}")
+        print(f"    ✓ {label} {past} cleanly with {best_solver}")
     return True
 
 def add_tile_label(label, cx, cy):
@@ -724,6 +824,39 @@ def add_tile_label(label, cx, cy):
     return txt
 
 # ---- Build -------------------------
+def ensure_consistent_normals(obj):
+    """Runs Blender's own edit-mode 'Recalculate Normals Outside' on
+    obj. build_plate_body already calls bmesh.ops.recalc_face_normals,
+    but that's a flood-fill from one seed face with no guaranteed
+    "outward" reference -- it only makes normals mutually CONSISTENT,
+    not necessarily all pointing out of the solid. Investigating why
+    canal/slot cuts have reported "boolean succeeded but cutter
+    vertices leaked into the result" on SensorBase_TR/BR specifically
+    -- and only there, never TL/BL, even using the literal same cutter
+    object against both in the same cut -- ruled out the cutter's own
+    geometry entirely (same object, different result depending only on
+    which target it's applied to). TR/BR's mesh is a genuinely
+    different, partly-mirrored topology from TL/BL (confirmed
+    separately: R02/R07, each centered exactly on the quadrant split,
+    end up with some of their own edges using a simplified flat-wall
+    fallback that reaches into the neighboring quadrant's territory) --
+    a plausible way for a same-mesh-consistent-but-inward flood fill
+    to happen is exactly this kind of topology, and inverted normals
+    are a well-known cause of a boolean solver's inside/outside test
+    going wrong in precisely this "reports success, partially fuses
+    the cutter in" way. The operator-based normals_make_consistent
+    (what "Recalculate Normals Outside" in the Mesh menu runs) uses a
+    more robust outward test than the bmesh.ops flood fill, so this is
+    cheap, safe insurance to run right after every quadrant is built,
+    before any cuts touch it."""
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.mesh.normals_make_consistent(inside=False)
+    bpy.ops.object.mode_set(mode='OBJECT')
+
 def build_side(tiles, solid_name, shift_x=0.0, shift_y=0.0):
     grid_tiles = [(cx, cy) for (tag, cx, cy) in tiles]
     print(f"\n{'='*60}")
@@ -731,6 +864,8 @@ def build_side(tiles, solid_name, shift_x=0.0, shift_y=0.0):
     print(f"{'='*60}")
 
     obj = build_plate_body(grid_tiles, solid_name, shift_x, shift_y)
+    ensure_consistent_normals(obj)
+    report_self_intersections(obj)
 
     for i, (tag, cx, cy) in enumerate(tiles):
         print(f"\n  [{i+1}/{len(tiles)}] Processing {tag} at ({cx:.3f}, {cy:.3f})...")
@@ -801,6 +936,10 @@ ROD_HOLE_COLUMNS = [
 print(f"\n{'='*60}")
 print("Cutting wire-routing canals")
 print(f"{'='*60}")
+print("\n  Self-intersection check just before the canal cuts (after wire "
+      "holes + X-axis rod holes, still before the canal/rail/slot cuts):")
+for obj in quadrant_objs:
+    report_self_intersections(obj)
 
 def _find_tile(tiles, tag):
     for t, cx, cy in tiles:
@@ -1223,6 +1362,228 @@ for label, col_x, objs in ROD_HOLE_COLUMNS:
         print(f"    {obj.name}: volume {vol0:.0f}mm^3 -> {vol1:.0f}mm^3 "
               f"(removed {vol0-vol1:.0f}mm^3)")
     bpy.data.objects.remove(cutter, do_unlink=True)
+
+# ---- Fit tabs at the top/bottom rail L/R seams -- interlocking
+# tongue-and-groove registration features so the printed quadrants
+# can't slide relative to each other at the rail level, on top of what
+# the threaded rods already do. One tab+slot pair per rail (top,
+# bottom), at the same X=SPLIT_X seam the rail itself is split at; the
+# left half (TopRail_L / BottomRail_L) carries the protruding tab, the
+# right half the matching slot.
+#
+# Width (15mm) runs vertically (Z), not along the rail's own depth
+# (Y): the Y-depth available right at the seam varies hugely with
+# where the split lands on the tip/valley silhouette -- the top seam
+# has ~28.9mm of rail-only Y-depth there, but the bottom seam lands
+# almost exactly on a tip, leaving only ~4.6mm. Z has the full 46mm of
+# rail height to draw on regardless.
+#
+# Positioned at the rail's own OUTER surface (y_outer), not tucked
+# inward, per your ask to have it flush and visible from outside --
+# the tab's outer face actually sits TAB_OUTER_PROUD past y_outer
+# (a deliberate, small, visible proud edge, not an exactly-coincident
+# plane) both so it reads clearly as a feature from outside and so the
+# union has an unambiguous boundary to resolve rather than a knife's-
+# edge coincidence with the rail's own flat roof. Inward thickness
+# from there is set PER SEAM, not shared, per your ask: the bottom
+# seam (near a tip, only ~4.6mm of rail-only depth available) uses
+# nearly all of it (5.0mm, leaving ~0.1mm before the chain/wall
+# boundary), while the top seam (a valley, ~28.9mm available) uses a
+# more modest 12.0mm you specified directly rather than maxing out.
+#
+# Z-position (5..20mm) sits below the X-axis rail rod (Z~32.5..39.5)
+# with margin, within the base slab / bottom of the wall band.
+#
+# Cross-section in X-Z is a right-trapezoid, not a rectangle: the
+# original rectangular tab sat flush with the wall at X=0 starting
+# abruptly at Z=5, with nothing at all below it (X>0, Z<5) in the
+# tab-side quadrant's own print -- a genuine unsupported horizontal
+# overhang, exactly the FDM print problem you flagged. The trapezoid
+# ramps the protrusion from 0 (flush, at Z=TAB_Z0) up to full depth
+# over TAB_RAMP_HEIGHT of Z (a 45-degree incline, printable without
+# support), then stays at full depth for the rest of the tab's height.
+print(f"\n{'='*60}")
+print("Adding fit tabs at the top/bottom rail L/R seams")
+print(f"{'='*60}")
+
+TAB_WIDTH_Z = 15.0
+TAB_DEPTH_X = 6.0
+# Per-seam Y-thickness, not a single shared value -- per your ask:
+# the bottom seam (L06/R07, landing almost on a tip) uses essentially
+# ALL of its available rail-only depth (checked numerically: the
+# proud outer edge to the chain/wall boundary is 5.108mm there, so
+# 5.0mm uses nearly all of it with a hair of margin -- matches what
+# you were seeing as "2 or 3mm you can add in" beyond the old 3mm).
+# The top seam (L01/R00, a valley -- ~28.9mm available) uses the
+# 12.0mm you asked for specifically, well short of the max.
+TOP_TAB_THICKNESS_Y = 12.0
+BOTTOM_TAB_THICKNESS_Y = 5.0
+TAB_Z0 = 5.0
+TAB_Z1 = TAB_Z0 + TAB_WIDTH_Z
+TAB_RAMP_HEIGHT = TAB_DEPTH_X   # 45-degree self-supporting ramp (rise == run)
+TAB_OUTER_PROUD = 0.5   # tab's outer face sits this far past y_outer --
+                          # see comment above.
+TAB_UNION_OVERLAP_X = 3.0   # the tab profile extends this far PAST X=0
+                             # into the tab-side quadrant's own existing
+                             # solid, so the union has a genuine
+                             # volumetric overlap to resolve rather than
+                             # merely touching it at a single coincident
+                             # plane -- the same class of degenerate
+                             # case (touching, not overlapping,
+                             # geometry) that caused several of the
+                             # boolean failures earlier this session.
+TAB_SLOT_CLEARANCE = 0.2   # the slot is cut this much larger than the
+                             # tab's own ramped profile, offset OUTWARD
+                             # (perpendicular to each face, mitered at
+                             # the corners -- see
+                             # _offset_ramped_tab_profile) on every real
+                             # tab surface (ramp, deep face, top face),
+                             # not just a bounding box. Originally this
+                             # was a plain rectangular box (removing
+                             # material has no overhang concern, so
+                             # nothing FORCED it to match the tab's
+                             # shape) -- but that left the female side
+                             # not actually reflecting the male tab's
+                             # ramp, with needless slop right at the
+                             # ramp corner instead of a properly keyed
+                             # fit. The near (seam-facing) end still
+                             # opens flat at X=-1 rather than following
+                             # the profile all the way in, same as
+                             # before, to guarantee the cutter actually
+                             # punctures through the boundary face
+                             # rather than being tangent to it. A small
+                             # friction-fit clearance; tune for your
+                             # printer if 0.2mm prints too tight/loose.
+
+def _extrude_profile_along_y(bm, profile_xz, y0, y1):
+    """Extrudes a closed 2D profile (list of (x,z) points, in order)
+    along Y from y0 to y1 into a closed solid prism.
+
+    Winding is deliberately reversed from the "obvious" order below --
+    verified in-engine (signed volume of the raw prism) that the naive
+    winding produces a fully consistent but INWARD-facing solid (every
+    face backwards, not a mixed/broken mesh). A union tolerates that
+    fine (confirmed: the TAB_PROFILE prism, built the exact same way,
+    unions onto SensorBase_TL/BL without issue), but it's exactly what
+    made the fit-tab SLOT cut fail identically on SensorBase_TR/BR --
+    "boolean reported success but 2 cutter vertices leaked into the
+    result" at the same relative corner regardless of the box's
+    position, size, or padding (tested directly against a duplicate:
+    shifting/padding every axis still leaked the identical corner,
+    ruling out a coincident-geometry cause). Reversing every face here
+    made that DIFFERENCE cut resolve cleanly (0 non-manifold edges, 0
+    zero-area faces, mesh.validate() clean, removed volume matching the
+    box's expected volume) -- confirmed against both SensorBase_TR and
+    SensorBase_BR before applying here."""
+    near = [bm.verts.new((x, y0, z)) for x, z in profile_xz]
+    far = [bm.verts.new((x, y1, z)) for x, z in profile_xz]
+    n = len(profile_xz)
+    for i in range(n):
+        j = (i + 1) % n
+        bm.faces.new([near[j], near[i], far[i], far[j]])
+    bm.faces.new(near)
+    bm.faces.new(list(reversed(far)))
+
+def make_profile_cutter(name, profile_xz, y0, y1):
+    mesh = bpy.data.meshes.new(name + "_mesh")
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    bm = bmesh.new()
+    _extrude_profile_along_y(bm, profile_xz, y0, y1)
+    bm.normal_update()
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.validate()
+    return obj
+
+def make_box_cutter(name, x0, x1, y0, y1, z0, z1):
+    return make_profile_cutter(name, [(x0, z0), (x1, z0), (x1, z1), (x0, z1)], y0, y1)
+
+def _offset_ramped_tab_profile(depth_x, ramp_height, z0, z1, clearance, open_x=-1.0):
+    """Builds the SLOT profile as the tab's own ramped right-trapezoid
+    silhouette (the same shape TAB_PROFILE traces from X=0 outward: up
+    the ramp, out to the deep face, across the top) expanded outward by
+    `clearance`, perpendicular to each real face and properly mitered
+    at the two corners -- so the female cavity actually follows the
+    male tab's shape instead of a bounding box that's needlessly loose
+    right at the ramp. The near (seam-facing) end is deliberately left
+    open at `open_x` (not mitered/closed off) so the cutter still
+    reliably punctures through the target's own boundary face, same
+    reasoning as the original box cutter's -1.0 start."""
+    dx, dz = depth_x, ramp_height
+    L = math.hypot(dx, dz)
+    ramp_n = (dz / L, -dx / L)
+    deep_n = (1.0, 0.0)
+    top_n = (0.0, 1.0)
+
+    def miter(n1, n2, corner):
+        mx, my = n1[0] + n2[0], n1[1] + n2[1]
+        mL = math.hypot(mx, my)
+        mx, my = mx / mL, my / mL
+        cos_half = mx * n1[0] + my * n1[1]
+        d = clearance / cos_half
+        return (corner[0] + mx * d, corner[1] + my * d)
+
+    deep_bottom_off = miter(ramp_n, deep_n, (depth_x, z0 + ramp_height))
+    deep_top_off = miter(deep_n, top_n, (depth_x, z1))
+    near_bottom_z = z0 + ramp_n[1] * clearance
+    near_top_z = z1 + top_n[1] * clearance
+
+    return [
+        (open_x, near_bottom_z),
+        deep_bottom_off,
+        deep_top_off,
+        (open_x, near_top_z),
+    ]
+
+TAB_PROFILE = [
+    (-TAB_UNION_OVERLAP_X, TAB_Z0),
+    (0.0, TAB_Z0),
+    (TAB_DEPTH_X, TAB_Z0 + TAB_RAMP_HEIGHT),
+    (TAB_DEPTH_X, TAB_Z1),
+    (-TAB_UNION_OVERLAP_X, TAB_Z1),
+]
+
+TAB_SEAMS = [
+    ("Top",    TOP_RAIL_Y_OUTER,    ROW_SPLIT_MARGIN,  -1, tl_obj, tr_obj, TOP_TAB_THICKNESS_Y),
+    ("Bottom", BOTTOM_RAIL_Y_OUTER, -ROW_SPLIT_MARGIN, +1, bl_obj, br_obj, BOTTOM_TAB_THICKNESS_Y),
+]
+
+for label, y_outer_unshifted, shift_y, inward_sign, left_obj, right_obj, thickness_y in TAB_SEAMS:
+    y_outer_shifted = y_outer_unshifted + shift_y
+    y_proud = y_outer_shifted - inward_sign * TAB_OUTER_PROUD
+    y_inner = y_proud + inward_sign * thickness_y
+    y0, y1 = sorted([y_proud, y_inner])
+    print(f"\n  {label} seam: Y {y0:.2f}..{y1:.2f} (outer face {TAB_OUTER_PROUD:.1f}mm proud "
+          f"of y_outer={y_outer_shifted:.2f}), Z {TAB_Z0:.1f}..{TAB_Z1:.1f}, tab X 0..{TAB_DEPTH_X:.1f}")
+
+    # Both cutters below are built directly in world coordinates (like
+    # make_canal_cutter), so no apply_transforms call is needed.
+    tab_cutter = make_profile_cutter(f"Hole_{label}Tab", TAB_PROFILE, y0, y1)
+    safe_cut(f"{label} seam tab on {left_obj.name}", left_obj, tab_cutter,
+              primary='EXACT', operation='UNION')
+    bpy.data.objects.remove(tab_cutter, do_unlink=True)
+
+    # The slot's outer edge is clamped to the rail's actual y_outer
+    # surface (plus the normal small clearance) rather than reusing
+    # y0/y1's outer bound, which includes the tab's own
+    # TAB_OUTER_PROUD extension. That proud sliver sticks out into
+    # open air past BOTH pieces' real material -- the tab's tip is
+    # meant to be visible/external, not socketed -- so a slot cutter
+    # reaching that far was mostly sitting in empty space, tangent to
+    # the slot side's own boundary rather than genuinely inside or
+    # outside it. Confirmed in-engine: this was exactly why the slot
+    # cut failed identically on both right-side quadrants ("2 cutter
+    # vertices leaked") while the tab's own union (a completely
+    # different cutter shape, on the left side) succeeded fine.
+    slot_y_outer = y_outer_shifted + (-inward_sign) * TAB_SLOT_CLEARANCE
+    slot_y_inner = y_inner + inward_sign * TAB_SLOT_CLEARANCE
+    sy0, sy1 = sorted([slot_y_outer, slot_y_inner])
+    slot_profile = _offset_ramped_tab_profile(TAB_DEPTH_X, TAB_RAMP_HEIGHT, TAB_Z0, TAB_Z1,
+                                               TAB_SLOT_CLEARANCE, open_x=-1.0)
+    slot_cutter = make_profile_cutter(f"Hole_{label}Slot", slot_profile, sy0, sy1)
+    safe_cut(f"{label} seam slot on {right_obj.name}", right_obj, slot_cutter, primary='EXACT')
+    bpy.data.objects.remove(slot_cutter, do_unlink=True)
 
 for obj in quadrant_objs:
     obj.data.update()
