@@ -1616,6 +1616,27 @@ export_obj(tr_obj, "flat_hex_plate-Walls2_TOP_RIGHT.stl")
 export_obj(bl_obj, "flat_hex_plate-Walls2_BOTTOM_LEFT.stl")
 export_obj(br_obj, "flat_hex_plate-Walls2_BOTTOM_RIGHT.stl")
 
+# ---- Assembled-view positioning (viewport only) ----------------------
+# Runs AFTER export above, so the exported STLs still have the real
+# ROW_SPLIT_MARGIN gap baked into their geometry (needed for print
+# separation/handling clearance) -- only the four objects' own
+# world-space location is nudged here, closing that gap so the
+# viewport shows the tray as it looks assembled. Mesh data is
+# untouched; re-running this script rebuilds the objects at the origin
+# and reapplies this same nudge, so the assembled view no longer has
+# to be redone by hand after every re-run.
+print(f"\n{'='*60}")
+print("Positioning quadrants together for an assembled view (viewport only)")
+print(f"{'='*60}")
+tl_obj.location.y -= ROW_SPLIT_MARGIN
+tr_obj.location.y -= ROW_SPLIT_MARGIN
+bl_obj.location.y += ROW_SPLIT_MARGIN
+br_obj.location.y += ROW_SPLIT_MARGIN
+bpy.context.view_layer.update()
+for area in bpy.context.screen.areas:
+    if area.type == 'VIEW_3D':
+        area.tag_redraw()
+
 print("\n" + "="*60)
 print("=== DONE ===")
 print(f"Top-Left plate: {len(tl_tiles)} tiles")
