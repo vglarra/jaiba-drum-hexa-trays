@@ -206,7 +206,7 @@ print("=" * 60)
 def cleanup_objects():
     to_remove = []
     for obj in bpy.data.objects:
-        if obj.name.startswith(("SensorBase", "Hole_", "Wire_", "TileNum_", "Cut_")):
+        if obj.name.startswith(("SensorBase", "Hole_", "Wire_", "TileNum_", "Cut_", "WallSeg_")):
             to_remove.append(obj)
     for obj in to_remove:
         bpy.data.objects.remove(obj, do_unlink=True)
@@ -1636,6 +1636,268 @@ bpy.context.view_layer.update()
 for area in bpy.context.screen.areas:
     if area.type == 'VIEW_3D':
         area.tag_redraw()
+
+# ---- Wall-segment labeling (W1, W2, ...) -- generalizes the earlier
+# W1-only approach into a full boundary-trace walk. Purely additive/
+# informational, doesn't touch any geometry. Runs here (after rails +
+# fit tabs) because it needs RAIL_SPECS-equivalent data (TOP_ROW_TILES,
+# TOP_RAIL_Y_OUTER, etc), all computed earlier in the rail section.
+#
+# A tile-by-tile approach (the old W1 code) breaks down for the rail
+# rows, where merge_rail_into_wall has already replaced several tiles'
+# worth of individual zigzag wall edges with ONE flat rail roof --
+# labeling tile-by-tile there would put 2-3 labels on what is now
+# genuinely a single flat face. So instead: walk the GLOBAL, unsplit
+# true-exterior boundary trace edge by edge (same nxt adjacency
+# compute_boundary_offset_map builds internally for grid_orig,
+# rebuilt directly here to avoid touching that function), and merge
+# consecutive edges into ONE labeled segment when either:
+#   - they're geometrically collinear (direction within
+#     ANGLE_MERGE_TOL_DEG) -- handles genuine multi-tile-wide flat
+#     runs on the plain wall (e.g. L02's own 3-edge west-corner run
+#     stays 3 separate labels, since those edges are NOT collinear
+#     with each other; W1 below is confirmed still exactly the single
+#     west edge from the earlier per-tile version), or
+#   - they were both replaced by the SAME rail (checked by owner tile
+#     membership in TOP_ROW_TILES/BOTTOM_ROW_TILES + which side of
+#     SPLIT_X, the same ownership test merge_rail_into_wall's own
+#     is_local_owner uses) -- collapses an entire rail's zigzag span
+#     into one label, positioned on the rail's own y_outer surface
+#     (the wall_outer_offset data at that location now describes
+#     buried, no-longer-exposed geometry) instead of the collinearity
+#     rule, since the RAW edges there still zigzag even though the
+#     BUILT rail face covering them is flat.
+print(f"\n{'='*60}")
+print("Labeling wall segments (W1, W2, ...)")
+print(f"{'='*60}")
+
+WALL_SEGMENT_LABEL_PUSH = 5.0   # matches the original W1's own push
+WALL_SEGMENT_LABEL_Z = (0.0 + PLATE_H + WALL_HEIGHT) / 2.0   # matches
+                         # W1's own Z -- the rail's own z0/z1 (passed
+                         # into merge_rail_into_wall) are the SAME
+                         # 0..PLATE_H+WALL_HEIGHT range as the plain
+                         # wall, so one fixed Z works for every label.
+ANGLE_MERGE_TOL_DEG = 2.0
+
+_seg_nxt, _seg_coord, _seg_owner = {}, {}, {}
+for (_cx, _cy) in grid_orig:
+    _corners = get_hex_corners(_cx, _cy, HEX_FLAT_WIDTH)
+    for _i in range(6):
+        _j = (_i + 1) % 6
+        _p0, _p1 = _corners[_i], _corners[_j]
+        _ek = tuple(sorted([_vkey(_p0), _vkey(_p1)]))
+        if FULL_EDGE_COUNT.get(_ek, 0) != 1:
+            continue
+        _k0, _k1 = _vkey(_p0), _vkey(_p1)
+        _seg_nxt[_k0] = _k1
+        _seg_coord[_k0] = _p0
+        _seg_coord[_k1] = _p1
+        _seg_owner[_ek] = (_cx, _cy)
+
+_left_grid_raw = left_grid
+_right_grid_raw = [(cx - GAP_BETWEEN_PLATES, cy) for cx, cy in right_grid]
+_RAW_TAG_MAP = {}
+for _i, (_cx, _cy) in enumerate(_left_grid_raw):
+    _RAW_TAG_MAP[_vkey((_cx, _cy))] = f"L{_i:02d}"
+for _i, (_cx, _cy) in enumerate(_right_grid_raw):
+    _RAW_TAG_MAP[_vkey((_cx, _cy))] = f"R{_i:02d}"
+
+# Start the walk at L02's own west edge specifically, so that edge
+# becomes segment #1 (W1) -- matching the W1 label already verified
+# earlier, rather than an arbitrary trace start point. (Confirmed
+# safe: neither neighboring edge is collinear with it, so it stays a
+# standalone segment regardless of where the walk begins.)
+_l02_cx, _l02_cy = left_grid[2]
+_l02_corners = get_hex_corners(_l02_cx, _l02_cy, HEX_FLAT_WIDTH)
+_l02_west_edge, _l02_west_normal_check = None, None
+for _i in range(6):
+    _j = (_i + 1) % 6
+    _p0, _p1 = _l02_corners[_i], _l02_corners[_j]
+    _ek = tuple(sorted([_vkey(_p0), _vkey(_p1)]))
+    if FULL_EDGE_COUNT.get(_ek, 0) != 1:
+        continue
+    _dx, _dy = _p1[0] - _p0[0], _p1[1] - _p0[1]
+    _L = math.hypot(_dx, _dy)
+    _n = (_dy / _L, -_dx / _L)
+    if _l02_west_normal_check is None or _n[0] < _l02_west_normal_check[0]:
+        _l02_west_normal_check = _n
+        _l02_west_edge = (_p0, _p1)
+_START_KEY = _vkey(_l02_west_edge[0])
+
+_raw_edges = []
+_cur = _START_KEY
+while True:
+    _nxt_k = _seg_nxt[_cur]
+    _ek = tuple(sorted([_cur, _nxt_k]))
+    _raw_edges.append((_seg_coord[_cur], _seg_coord[_nxt_k], _seg_owner[_ek]))
+    if _nxt_k == _START_KEY:
+        break
+    _cur = _nxt_k
+
+print(f"  {len(_raw_edges)} true-exterior raw edges in the global trace")
+
+_top_row_set = {_vkey(t) for t in TOP_ROW_TILES}
+_bottom_row_set = {_vkey(t) for t in BOTTOM_ROW_TILES}
+
+def _rail_group_for(owner):
+    ok = _vkey(owner)
+    if ok in _top_row_set:
+        return "TopRail_L" if owner[0] < SPLIT_X else "TopRail_R"
+    if ok in _bottom_row_set:
+        return "BottomRail_L" if owner[0] < SPLIT_X else "BottomRail_R"
+    return None
+
+_RAIL_Y_OUTER = {
+    "TopRail_L": TOP_RAIL_Y_OUTER, "TopRail_R": TOP_RAIL_Y_OUTER,
+    "BottomRail_L": BOTTOM_RAIL_Y_OUTER, "BottomRail_R": BOTTOM_RAIL_Y_OUTER,
+}
+_RAIL_OUTWARD = {
+    "TopRail_L": (0.0, 1.0), "TopRail_R": (0.0, 1.0),
+    "BottomRail_L": (0.0, -1.0), "BottomRail_R": (0.0, -1.0),
+}
+
+def _edge_dir(p0, p1):
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    L = math.hypot(dx, dy) or 1.0
+    return (dx / L, dy / L)
+
+def _edge_normal(p0, p1):
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    L = math.hypot(dx, dy) or 1.0
+    return (dy / L, -dx / L)
+
+_groups = []
+for _edge in _raw_edges:
+    _p0, _p1, _owner = _edge
+    _rg = _rail_group_for(_owner)
+    if _groups:
+        _prev = _groups[-1]
+        _same_rail = (_rg is not None and _rg == _prev['rail'])
+        _both_plain = (_rg is None and _prev['rail'] is None)
+        _collinear = False
+        if _both_plain:
+            _pe = _prev['edges'][-1]
+            _d_prev = _edge_dir(_pe[0], _pe[1])
+            _d_this = _edge_dir(_p0, _p1)
+            _dot = max(-1.0, min(1.0, _d_prev[0]*_d_this[0] + _d_prev[1]*_d_this[1]))
+            _angle = math.degrees(math.acos(_dot))
+            _collinear = _angle <= ANGLE_MERGE_TOL_DEG
+        if _same_rail or (_both_plain and _collinear):
+            _prev['edges'].append(_edge)
+            continue
+    _groups.append({'rail': _rg, 'edges': [_edge]})
+
+print(f"  Merged into {len(_groups)} labeled segments before end-cap transitions")
+
+# Precompute each group's own (position, outward normal, owner tags) --
+# uniformly for both plain-wall and rail groups -- before assigning
+# final sequential numbers, since transition entries (below) get
+# spliced in between groups and need the same uniform shape.
+def _group_owner_tags(edges):
+    tags = []
+    for e in edges:
+        tag = _RAW_TAG_MAP.get(_vkey(e[2]), f"({e[2][0]:.1f},{e[2][1]:.1f})")
+        if tag not in tags:
+            tags.append(tag)
+    return tags
+
+def _group_pos_normal(grp):
+    edges = grp['edges']
+    p_start, p_end = edges[0][0], edges[-1][1]
+    if grp['rail'] is not None:
+        y_outer = _RAIL_Y_OUTER[grp['rail']]
+        out_n = _RAIL_OUTWARD[grp['rail']]
+        face = ((p_start[0] + p_end[0]) / 2.0, y_outer)
+    else:
+        wo_mids = []
+        for e in edges:
+            wo0 = GLOBAL_WALL_OFFSET.get(_vkey(e[0]), e[0])
+            wo1 = GLOBAL_WALL_OFFSET.get(_vkey(e[1]), e[1])
+            wo_mids.append(((wo0[0]+wo1[0])/2.0, (wo0[1]+wo1[1])/2.0))
+        face = (sum(m[0] for m in wo_mids) / len(wo_mids),
+                sum(m[1] for m in wo_mids) / len(wo_mids))
+        out_n = _edge_normal(edges[0][0], edges[0][1])
+    return face, out_n
+
+# ---- End-cap transitions -- merge_rail_into_wall builds a real,
+# distinct connecting face at each rail's OUTER end (the end away from
+# SPLIT_X, where it meets a plain-wall tile rather than the matching
+# rail on the other quadrant) -- from the rail's own roof corner
+# (outer_x, y_outer) down to the plain wall's own wall_outer point at
+# that same shared raw corner. The rail's own roof X always exactly
+# equals that wall_outer point's X (both derived from the same
+# GLOBAL_WALL_OFFSET lookup on the same corner), so the roof point is
+# just that wall_outer point with Y swapped to y_outer -- no need to
+# separately reach into RAIL_SPECS' x0/x1 for this. The SPLIT_X-side
+# end of each rail meets its sibling rail directly (no plain wall,
+# same y_outer, no such face exists there) so only transitions between
+# a plain group and a rail group -- not rail-to-rail -- get one.
+_entries = []   # ordered final list of dicts: {label, edges/pseudo, pos, out_n, tags}
+for _i, _grp in enumerate(_groups):
+    if _i > 0:
+        _prev = _groups[_i - 1]
+        _is_transition = (_prev['rail'] is None) != (_grp['rail'] is None)
+        if _is_transition:
+            _rail_grp = _grp if _grp['rail'] is not None else _prev
+            _plain_grp = _prev if _grp['rail'] is not None else _grp
+            _shared_raw = _prev['edges'][-1][1]   # == _grp['edges'][0][0]
+            _wall_outer_pt = GLOBAL_WALL_OFFSET.get(_vkey(_shared_raw), _shared_raw)
+            _y_outer = _RAIL_Y_OUTER[_rail_grp['rail']]
+            _roof_pt = (_wall_outer_pt[0], _y_outer)
+            _side_sign = -1.0 if _wall_outer_pt[0] < 0 else 1.0
+            _t_out_n = (_side_sign, 0.0)
+            _t_pos = ((_wall_outer_pt[0] + _roof_pt[0]) / 2.0,
+                      (_wall_outer_pt[1] + _roof_pt[1]) / 2.0)
+            _t_tags = _group_owner_tags(_plain_grp['edges'][-1:]) + _group_owner_tags(_rail_grp['edges'][:1])
+            _entries.append({'pos': _t_pos, 'out_n': _t_out_n,
+                              'p_start': _shared_raw, 'p_end': _shared_raw, 'length': 0.0,
+                              'tags': _t_tags})
+    _pos, _out_n = _group_pos_normal(_grp)
+    _entries.append({'pos': _pos, 'out_n': _out_n,
+                      'p_start': _grp['edges'][0][0], 'p_end': _grp['edges'][-1][1],
+                      'length': sum(math.hypot(e[1][0]-e[0][0], e[1][1]-e[0][1]) for e in _grp['edges']),
+                      'tags': _group_owner_tags(_grp['edges']),
+                      'edges': _grp['edges']})
+
+print(f"  {len(_entries) - len(_groups)} end-cap transition(s) added -- {len(_entries)} labels total")
+
+WALL_SEGMENT_LABELS = {}   # frozenset({raw_vkey0, raw_vkey1}) -> "W<n>",
+                            # keyed per constituent edge so any raw
+                            # edge in a merged (non-transition) segment
+                            # resolves to it
+WALL_SEGMENT_INFO = []      # (label, p_start, p_end, length, owner_tags)
+
+for _n, _entry in enumerate(_entries, start=1):
+    _label = f"W{_n}"
+    WALL_SEGMENT_INFO.append((_label, _entry['p_start'], _entry['p_end'], _entry['length'], _entry['tags']))
+    if 'edges' in _entry:
+        for _e in _entry['edges']:
+            WALL_SEGMENT_LABELS[frozenset([_vkey(_e[0]), _vkey(_e[1])])] = _label
+
+    _out_n = _entry['out_n']
+    _label_x = _entry['pos'][0] + _out_n[0] * WALL_SEGMENT_LABEL_PUSH
+    _label_y = _entry['pos'][1] + _out_n[1] * WALL_SEGMENT_LABEL_PUSH
+
+    bpy.ops.object.text_add(location=(_label_x, _label_y, WALL_SEGMENT_LABEL_Z))
+    _txt = bpy.context.active_object
+    _txt.name = f"WallSeg_{_label}"
+    _txt.data.body = _label
+    _txt.data.size = 5.0
+    _txt.data.align_x = 'CENTER'
+    _txt.data.align_y = 'CENTER'
+    # Standing upright, facing outward -- identical technique to the
+    # original W1: local Z (the readable-from side) points along the
+    # segment's own outward normal, local Y kept close to world Z.
+    _txt.rotation_mode = 'QUATERNION'
+    _outward_vec = Vector((_out_n[0], _out_n[1], 0.0))
+    _txt.rotation_quaternion = _outward_vec.to_track_quat('Z', 'Y')
+
+print(f"\n  {'Label':<6} {'P_start':<22} {'P_end':<22} {'Len':>7}  Tiles")
+for _label, _p_start, _p_end, _length, _owner_tags in WALL_SEGMENT_INFO:
+    print(f"  {_label:<6} ({_p_start[0]:8.3f},{_p_start[1]:8.3f})   "
+          f"({_p_end[0]:8.3f},{_p_end[1]:8.3f})   {_length:7.2f}  {','.join(_owner_tags)}")
+print(f"  Placed {len(WALL_SEGMENT_INFO)} wall-segment labels")
+print("=" * 60)
 
 print("\n" + "="*60)
 print("=== DONE ===")
