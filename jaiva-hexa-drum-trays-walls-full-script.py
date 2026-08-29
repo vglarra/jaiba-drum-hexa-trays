@@ -206,10 +206,15 @@ print("=" * 60)
 def cleanup_objects():
     to_remove = []
     for obj in bpy.data.objects:
-        if obj.name.startswith(("SensorBase", "Hole_", "Wire_", "TileNum_", "Cut_", "WallSeg_")):
+        if obj.name.startswith(("SensorBase", "Hole_", "Wire_", "TileNum_", "Cut_", "WallSeg_",
+                                "W23", "CornerStrip")):
             to_remove.append(obj)
     for obj in to_remove:
         bpy.data.objects.remove(obj, do_unlink=True)
+    # Purge the red-line material if no longer referenced.
+    mat = bpy.data.materials.get("W23RedLine")
+    if mat is not None and mat.users == 0:
+        bpy.data.materials.remove(mat)
     print(f"Cleaned up {len(to_remove)} objects")
 
 cleanup_objects()
@@ -518,8 +523,9 @@ def make_wire_hole_cutter(name, cx, cy):
     obj.location=Vector((hx, hy, center_z))
     return obj
 
-def make_rod_hole_cutter(name, y_center, z_center, length=2000.0):
-    print(f"    Rod hole at Y={y_center:.3f}, Z={z_center:.3f} (⌀{ROD_HOLE_DIAMETER:.1f}mm, along X)")
+def make_rod_hole_cutter(name, y_center, z_center, length=2000.0, radius=None):
+    radius = ROD_HOLE_RADIUS if radius is None else radius
+    print(f"    Rod hole at Y={y_center:.3f}, Z={z_center:.3f} (⌀{2*radius:.1f}mm, along X)")
 
     mesh=bpy.data.meshes.new(name+"_mesh")
     obj=bpy.data.objects.new(name,mesh)
@@ -531,8 +537,8 @@ def make_rod_hole_cutter(name, y_center, z_center, length=2000.0):
 
     for i in range(segs):
         a=2*math.pi*i/segs
-        yo=ROD_HOLE_RADIUS*math.cos(a)
-        zo=ROD_HOLE_RADIUS*math.sin(a)
+        yo=radius*math.cos(a)
+        zo=radius*math.sin(a)
         bv.append(bm.verts.new((-half,yo,zo)))
         tv.append(bm.verts.new((half,yo,zo)))
 
@@ -541,6 +547,64 @@ def make_rod_hole_cutter(name, y_center, z_center, length=2000.0):
         bm.faces.new([bv[i],bv[j],tv[j],tv[i]])
     bm.faces.new(list(reversed(bv)))
     bm.faces.new(tv)
+    bm.normal_update()
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.validate()
+    obj.location=Vector((0.0, y_center, z_center))
+    return obj
+
+def make_hex_pocket_cutter(name, y_center, z_center, across_flats, length=2000.0):
+    """Same shape/coordinate convention as make_rod_hole_cutter (local X
+    spans -half..+half, cross-section in Y-Z, obj.location places it in
+    world space) but a regular hexagon instead of a circle -- for a nut
+    trap that keys against the nut's own flats (so it can't spin) rather
+    than a round bore. Corner angles follow the same 30+60*i convention
+    get_hex_corners uses elsewhere in this file.
+
+    Each end cap is built as a triangle fan from a center vertex, not a
+    single 6-gon: the W3 nut-seat pocket's inner cap lands inside solid
+    material (a blind cut, not a through-hole), and a lone N-gon cap
+    landing inside solid is exactly what the EXACT solver couldn't
+    resolve for the earlier round nut-seat cutter (25/32 cutter verts
+    leaking into the result) until triangulated after the fact -- doing
+    it as a fan from the start avoids needing that post-hoc pass.
+    recalc_face_normals is still run explicitly (not just normal_update,
+    which only recomputes vectors from whatever winding already exists):
+    for a convex solid like this prism there's no ambiguous concave
+    region to trip up the flood-fill, so it reliably finds the true
+    outward orientation, same reasoning as the corner-fill wedge."""
+    circumradius = across_flats / math.sqrt(3)
+    print(f"    Hex pocket at Y={y_center:.3f}, Z={z_center:.3f} "
+          f"({across_flats:.1f}mm across flats, along X)")
+
+    mesh=bpy.data.meshes.new(name+"_mesh")
+    obj=bpy.data.objects.new(name,mesh)
+    bpy.context.collection.objects.link(obj)
+    bm=bmesh.new()
+    segs=6
+    half=length/2.0
+    bv,tv=[],[]
+
+    for i in range(segs):
+        a=math.radians(30 + 60*i)
+        yo=circumradius*math.cos(a)
+        zo=circumradius*math.sin(a)
+        bv.append(bm.verts.new((-half,yo,zo)))
+        tv.append(bm.verts.new((half,yo,zo)))
+
+    for i in range(segs):
+        j=(i+1)%segs
+        bm.faces.new([bv[i],bv[j],tv[j],tv[i]])
+
+    bc = bm.verts.new((-half, 0.0, 0.0))
+    tc = bm.verts.new((half, 0.0, 0.0))
+    for i in range(segs):
+        j=(i+1)%segs
+        bm.faces.new([bc, bv[j], bv[i]])
+        bm.faces.new([tc, tv[i], tv[j]])
+
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     bm.normal_update()
     bm.to_mesh(mesh)
     bm.free()
@@ -894,22 +958,301 @@ br_obj = build_side(br_tiles, "SensorBase_BR", shift_x=GAP_BETWEEN_PLATES, shift
 
 quadrant_objs = [tl_obj, tr_obj, bl_obj, br_obj]
 
+# ============================================================
+# W2/W3 corner-bridging panel (Option A -- seamless, mitered
+# wall-outer footprint). Fills the exterior corner pocket bounded by
+# wall segments W2 (TL, L02: A2->C), W3 (BL, L04: C->B3), and the new
+# outer "green" diagonal A2->B3. Merged directly into the BL mesh (the
+# shared corner C and W3 are BL territory), NO boolean -- the same
+# direct-bmesh pattern merge_rail_into_wall uses. Built HERE, right
+# after the four quadrants are assembled and BEFORE the rod-hole /
+# canal / rail / tab cuts run, so every cutter that passes through
+# this corner region (the X-axis L04-R06 rod tunnel at Y~-56, the
+# L04-R06 canal) drills through the complete solid including the wedge,
+# leaving no thread/canal blockages.
+#
+# Footprint = the wall-thickness wedge OUTWARD of the wall corner, with
+# plan vertices A2_wo / C_wo / B3_wo (GLOBAL_WALL_OFFSET of the raw
+# corners -- Option A). Extruded Z = 0 .. PLATE_H+WALL_HEIGHT (46mm).
+# The C_wo->B3_wo edge coincides with BL's OWN existing W3 wall outer
+# face -- that face is KEPT as the wedge's shared inner boundary and
+# the prism welds onto those existing edge vertices via remove_doubles
+# (no duplicate coincident face built, per the rail-merge lesson). The
+# A2_wo->C_wo edge (W2, TL territory -- no face in BL) and the green
+# A2_wo->B3_wo diagonal are purely new faces on the BL print.
+# ============================================================
+def merge_corner_fill_into_bl(bl_obj, shift_x=0.0, shift_y=0.0):
+    print(f"\n{'='*60}")
+    print("Adding W2/W3 corner-bridging panel (filled triangle wedge, BL mesh)")
+    print(f"{'='*60}")
+    _A2r = (-210.0, 12.124)     # W1/W2 raw corner
+    _Cr  = (-168.0, -12.124)    # W2/W3 raw shared corner
+    _B3r = (-168.0, -60.622)    # W3/W4 raw corner
+
+    # Option A: use GLOBAL_WALL_OFFSET (the wall's own mitered outer
+    # surface) so the new faces merge flush with the surrounding wall.
+    pa = GLOBAL_WALL_OFFSET.get(_vkey(_A2r), _A2r)
+    pc = GLOBAL_WALL_OFFSET.get(_vkey(_Cr), _Cr)
+    pb = GLOBAL_WALL_OFFSET.get(_vkey(_B3r), _B3r)
+    print(f"  wall_outer A2={pa} C={pc} B3={pb}")
+
+    # BL-local frame (the mesh was built with shift_x/shift_y).
+    pa = (round(pa[0] + shift_x, 4), round(pa[1] + shift_y, 4))
+    pc = (round(pc[0] + shift_x, 4), round(pc[1] + shift_y, 4))
+    pb = (round(pb[0] + shift_x, 4), round(pb[1] + shift_y, 4))
+    print(f"  BL-local  A2={pa} C={pc} B3={pb}")
+
+    z0 = 0.0
+    z2 = PLATE_H + WALL_HEIGHT   # 46.0
+
+    bm = bmesh.new()
+    bm.from_mesh(bl_obj.data)
+    bm.verts.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    vmap = {}
+    def gv(x, y, z):
+        k = (round(x, 3), round(y, 3), round(z, 3))
+        if k not in vmap:
+            vmap[k] = bm.verts.new((x, y, z))
+        return vmap[k]
+
+    # Vertices of the triangular prism (z0 bottom, z2 top).
+    a0 = gv(pa[0], pa[1], z0); a2 = gv(pa[0], pa[1], z2)
+    c0 = gv(pc[0], pc[1], z0); c2 = gv(pc[0], pc[1], z2)
+    b0 = gv(pb[0], pb[1], z0); b2 = gv(pb[0], pb[1], z2)
+
+    # Note: no new face on the C->B vertical plane -- BL's existing W3
+    # wall-outer face already occupies it (shared inner boundary).
+    candidates = [
+        [a2, c2, b2],              # top face        (z=z2)
+        [b0, c0, a0],              # bottom face     (z=z0)
+        [a0, c0, c2, a2],          # A->C side       (toward W2 / TL)
+        [a2, b2, b0, a0],          # A->B green diagonal side
+    ]
+    built = 0
+    for f in candidates:
+        try:
+            bm.faces.new(f)
+            built += 1
+        except ValueError as e:
+            print(f"  ⚠ face skipped {e}")
+
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.001)
+
+    # The old W3 wall face (the quad at C->B3, X=pc[0]==pb[0]) is now
+    # fully interior -- solid on both sides, since the wedge fills what
+    # used to be void beyond it. Left in place it's a redundant internal
+    # membrane: any later boolean cutter that crosses this region (the
+    # X_L04-R06 rod tunnel, the W3 nut-seat counterbore) also has to cut
+    # a hole through this buried face, which the EXACT solver cannot
+    # resolve cleanly -- confirmed empirically (a fresh boolean cut
+    # through here produced dozens of new non-manifold edges, all
+    # exactly at this face's X, even though the cut through the real
+    # exterior boundary elsewhere was clean). Dissolve it so the old
+    # wall and the new wedge become one seamless solid instead of two
+    # volumes sharing a buried partition.
+    bm.faces.ensure_lookup_table()
+    _old_w3_key = frozenset([
+        (round(pc[0], 3), round(pc[1], 3), round(z0, 3)),
+        (round(pb[0], 3), round(pb[1], 3), round(z0, 3)),
+        (round(pb[0], 3), round(pb[1], 3), round(z2, 3)),
+        (round(pc[0], 3), round(pc[1], 3), round(z2, 3)),
+    ])
+    _old_w3_faces = []
+    for f in bm.faces:
+        if len(f.verts) == 4:
+            fkey = frozenset((round(v.co.x, 3), round(v.co.y, 3), round(v.co.z, 3)) for v in f.verts)
+            if fkey == _old_w3_key:
+                _old_w3_faces.append(f)
+    if _old_w3_faces:
+        # dissolve_faces is for merging a face into an ADJACENT coplanar
+        # neighbor across a shared edge -- this face has no such
+        # neighbor (its "other side" is the wedge, added as a separate,
+        # non-coplanar prism), so dissolve_faces silently no-ops on it.
+        # delete(..., context='FACES') removes just the face itself
+        # (keeping its edges/verts, still shared with the wedge and the
+        # rest of the wall), which is what's actually needed here.
+        bmesh.ops.delete(bm, geom=_old_w3_faces, context='FACES')
+        print(f"  Deleted {len(_old_w3_faces)} old, now-buried W3 wall face(s) -- wedge merged into one solid")
+    else:
+        print("  ⚠ old W3 wall face not found to delete -- corner fill may leave a redundant internal wall")
+
+    bm.normal_update()
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bm.normal_update()
+    bm.to_mesh(bl_obj.data)
+    bm.free()
+    bl_obj.data.update()
+
+    ensure_consistent_normals(bl_obj)
+    nm, za = report_manifold_stats(bl_obj)
+    si = report_self_intersections(bl_obj)
+    print(f"  W2/W3 corner fill merged into {bl_obj.name}: "
+          f"{built} new faces, {nm} non-manifold edges, {za} zero-area faces, "
+          f"{si} self-intersections")
+    return bl_obj, pa, pc, pb
+
+bl_obj, _W3_WEDGE_A2, _W3_WEDGE_C, _W3_WEDGE_B3 = merge_corner_fill_into_bl(
+    bl_obj, shift_x=0.0, shift_y=-ROW_SPLIT_MARGIN)
+
+# ---- W3 nut-seat counterbore -- the X_L04-R06 rod hole (cut further
+# below) is only ROD_HOLE_DIAMETER wide, and the W2/W3 corner-fill
+# wedge just above pushed BL's true outer surface out past the wedge's
+# slanted A2->B3 diagonal face (non-perpendicular to the rod axis, and
+# adjoining the 4 non-manifold edges the corner-fill merge reports) --
+# in the viewport that thin rod bore visibly stops short at the old W3
+# 6mm-wall face instead of reaching this new outer face, leaving the
+# rod tip buried. Rather than chase the exact boolean behavior on that
+# slanted/non-manifold face with the 7mm bore, cut a wide, flat-
+# bottomed nut-seat pocket from the wedge's real outer face straight
+# down to (and past) where the rod tip will land -- big enough in
+# diameter to swallow whatever sliver the thin bore would otherwise
+# leave behind, giving a flat face to seat a nut on the threaded rod.
+#
+# Cut BEFORE the X-axis rod holes below (not after): this pocket spans
+# the same X range the thin rod-hole cutter will later travel through.
+# Cutting the wide pocket into still-solid, unbroken material first
+# keeps its inner end-cap a plain fan in uniform solid; the thin
+# rod-hole cutter then just passes harmlessly through the already-
+# hollow pocket afterward. Doing it in the other order (thin hole
+# first) made the wide cutter's inner cap straddle the boundary of the
+# thin hole's pre-existing bore -- a partial annulus the EXACT solver
+# couldn't resolve (25-64 cutter vertices leaked into the result on
+# both EXACT and FLOAT, non-manifold edges exploding to 1000+).
+#
+# Hex, not round: a plain cylindrical bore lets the nut spin freely
+# when the rod is tightened, so this is now a proper nut TRAP, keyed
+# to the actual nut's own flats (11.5mm across flats) via
+# make_hex_pocket_cutter -- see that function for why each end cap is
+# built as a triangle fan rather than a single hexagon face.
+print(f"\n{'='*60}")
+print("Cutting W3 nut-trap pocket (11.5mm across flats x 5.5mm deep hex)")
+print(f"{'='*60}")
+NUT_SEAT_ACROSS_FLATS = 11.5   # the actual nut's wrench size
+NUT_SEAT_DEPTH = 5.5           # the actual nut's thickness, measured from
+                                 # the wedge's outer face at the pocket's
+                                 # own center Y -- back to just the nut
+                                 # (the earlier +2mm added inward was the
+                                 # wrong side; see NUT_SEAT_OUTSIDE_MARGIN).
+NUT_SEAT_CIRCUMRADIUS = NUT_SEAT_ACROSS_FLATS / math.sqrt(3)   # 6.64mm
+# The real blocker was OUTWARD, not deeper in: the wedge's own outer
+# face is a SLANTED plane (A2->B3, non-perpendicular to the rod axis),
+# not flat across the pocket's whole footprint -- it's thicker toward
+# A2 (north) and tapers to nothing at B3 (south). My hex cutter's mouth
+# is a flat plane at a single X, sized for the wedge's thickness at the
+# pocket's CENTER Y only. Ray-cast confirmed: at the pocket's own
+# northern edge (Y=-50.623, the hex's own +5.75mm-from-center vertex),
+# the wedge's true surface reaches all the way to X=-187.5 -- 2.3mm
+# past the old cutting plane at -185.185 (margin 1.0mm) -- leaving
+# exactly the uncut sliver of wedge material you flagged as a blocker
+# sitting on the diagonal wall, at the pocket's mouth, not deeper past
+# the nut. 4.0mm clears that worst point (-188.185) with ~0.7mm to
+# spare, instead of deepening the inward cap where nothing was wrong.
+NUT_SEAT_OUTSIDE_MARGIN = 4.0    # extra reach out past the wedge face, into
+                                  # open air. This cutter is a hollow tube
+                                  # (side wall + end caps), and the same
+                                  # "carried" behavior noted on the X-axis
+                                  # rod cutters applies here too -- the
+                                  # portion of the cutter sitting in open
+                                  # air isn't always a no-op; its own
+                                  # surface can survive as a visible
+                                  # floating stub past the real wall face
+                                  # (seen in-viewport as a second, larger
+                                  # cylinder poking out past the W3 wall,
+                                  # alongside the rod hole's own smaller one
+                                  # ending flush at the wall). 4.0mm clears
+                                  # the slanted wedge face's own worst-case
+                                  # thickness across the hex pocket's full
+                                  # footprint (see above) -- a bigger reach
+                                  # than float-precision alone would need,
+                                  # but still a small, deliberate margin
+                                  # measured against real geometry, not a
+                                  # guess, and short of where a visible
+                                  # carried lip showed up before (13mm+).
+
+_w3_tunnel_y = y1 + ROD_HOLE_Y_OFFSET_L04_R06
+# Centered on the rod hole's own Z (ROD_HOLE_Z_X_AXIS=7.0) so the nut
+# naturally captures the rod through its own middle. Unlike the old
+# 9.0mm-radius round nut-seat, NUT_SEAT_CIRCUMRADIUS (6.64mm) is
+# smaller than 7.0, so the pocket's lowest point (Z=7.0-6.64=0.36)
+# still clears the base plate's own floor (Z=0) without needing the
+# Z-recentering trick that fixed the round version's boolean corruption
+# (that corruption came from actually CROSSING Z=0 -- cutting a circular
+# hole through the plate's huge single bottom face -- not from being
+# merely close to it).
+_w3_tunnel_z = ROD_HOLE_Z_X_AXIS
+# Same A2->B3 diagonal the corner-fill wedge built, evaluated at the
+# rod tunnel's Y, to find the wedge's true outer face there.
+_w3_t = (_w3_tunnel_y - _W3_WEDGE_A2[1]) / (_W3_WEDGE_B3[1] - _W3_WEDGE_A2[1])
+_w3_face_x = _W3_WEDGE_A2[0] + _w3_t * (_W3_WEDGE_B3[0] - _W3_WEDGE_A2[0])
+print(f"  Wedge outer face at Y={_w3_tunnel_y:.3f}: X={_w3_face_x:.3f}")
+
+_w3_inner_x = _w3_face_x + NUT_SEAT_DEPTH          # 5.5mm deep, measured
+                                                     # from the real wall face
+_w3_outer_x = _w3_face_x - NUT_SEAT_OUTSIDE_MARGIN  # into open air, harmless
+_w3_len = _w3_inner_x - _w3_outer_x
+_w3_center_x = (_w3_inner_x + _w3_outer_x) / 2.0
+print(f"  Pocket spans X={_w3_outer_x:.3f} .. {_w3_inner_x:.3f} "
+      f"(cutter length={_w3_len:.3f}, center X={_w3_center_x:.3f})")
+
+nut_seat_cutter = make_hex_pocket_cutter(
+    "Hole_NutSeat_W3", _w3_tunnel_y, _w3_tunnel_z,
+    across_flats=NUT_SEAT_ACROSS_FLATS, length=_w3_len)
+nut_seat_cutter.location.x = _w3_center_x
+apply_transforms(nut_seat_cutter)
+safe_cut("W3 nut-trap pocket on SensorBase_BL", bl_obj, nut_seat_cutter, primary='EXACT')
+bpy.data.objects.remove(nut_seat_cutter, do_unlink=True)
+
 # ---- X-axis threaded-rod holes (unite the 4 quadrants) — UNCHANGED,
 # same positions, same order as before ----
 print(f"\n{'='*60}")
 print("Drilling X-axis threaded-rod holes")
 print(f"{'='*60}")
+
+
 ROD_HOLE_ROWS = [
-    ("X_L02-R04", y2, ROD_HOLE_Y_OFFSET, [tl_obj, tr_obj]),
-    ("X_L04-R06", y1, ROD_HOLE_Y_OFFSET_L04_R06, [bl_obj, br_obj]),
+    # (label, row_y, y_offset, [target_objs], cutter_length)
+    # The two rows exit different outer walls so each gets its OWN
+    # cutter length (see comment by the loop below).
+    ("X_L02-R04", y2, ROD_HOLE_Y_OFFSET, [tl_obj, tr_obj], 480.0),
+    ("X_L04-R06", y1, ROD_HOLE_Y_OFFSET_L04_R06, [bl_obj, br_obj], 372.0),
 ]
-for label, row_cy, y_offset, objs in ROD_HOLE_ROWS:
-    print(f"\n  Rod hole {label} (row Y={row_cy:.3f}, hole Y={row_cy + y_offset:.3f}, Z={ROD_HOLE_Z_X_AXIS:.1f})...")
-    cutter = make_rod_hole_cutter(f"Hole_Rod_{label}", row_cy + y_offset, ROD_HOLE_Z_X_AXIS)
+for label, row_cy, y_offset, objs, rod_len in ROD_HOLE_ROWS:
+    print(f"\n  Rod hole {label} (row Y={row_cy:.3f}, hole Y={row_cy + y_offset:.3f}, Z={ROD_HOLE_Z_X_AXIS:.1f}, length={rod_len:.0f})...")
+    # The X-axis rod cutter must reach WELL PAST the outer wall face(s)
+    # that THIS row's rod exits, so every rod hole opens all the way
+    # through -- a threaded rod has to slide in. In-engine the tunnel
+    # opening lands either at the cutter's own end ("carried" case) or
+    # at the wall face ("capped" case), so the cutter has to have
+    # enough reach that BOTH outcomes give an insertable through-hole,
+    # while staying as short as possible so the carried case doesn't
+    # leave a huge floating tube stub.
+    #
+    # Top row (L02-R04): exits W1 (west) and W12 (east), whose flat-to-
+    # corner faces reach out to ~X=+/-219. 480mm (X=-240..+240) clears
+    # them by ~21mm -- verified it opens flush at exactly +/-219.
+    #
+                # Bottom row (L04-R06): exits W3 (west) and BR's mirrored east
+    # face. W3's flat face was at X=-177 -- but the W2/W3 corner-fill
+    # wedge (merge_corner_fill_into_bl, added above) now extends BL's
+    # solid outward past that at this row's Y (ray-cast verified: true
+    # outer boundary at Y=-56.373 is X=-182.453, not -177). The old
+    # 360mm cutter (X=-180..+180) fell 2.45mm short of that, leaving a
+    # thin uncut cap blocking the west opening. 372mm (X=-186..+186)
+    # restores the same ~3mm "just past, capped flush" margin the old
+    # 360mm value had over the old -177 face, now measured against the
+    # wedge's actual -182.453 boundary. BR's east side is untouched by
+    # the wedge (still flush at +177), so the extra 6mm there is a
+    # small, harmless carried lip. Going much longer re-risks the
+    # "carried" floating-lip look flagged before (13mm lip at 380mm
+    # against the old -177 face; re-check against -182.453 if this
+    # value ever needs revisiting).
+    cutter = make_rod_hole_cutter(f"Hole_Rod_{label}", row_cy + y_offset, ROD_HOLE_Z_X_AXIS, length=rod_len)
     apply_transforms(cutter)
     for obj in objs:
         safe_cut(f"{label} rod hole on {obj.name}", obj, cutter, primary='EXACT')
     bpy.data.objects.remove(cutter, do_unlink=True)
+
 
 # ---- Y-axis threaded-rod holes (unite the 4 quadrants, other axis) --
 # positions unchanged from before, but the actual CUTTING now happens
@@ -1585,6 +1928,7 @@ for label, y_outer_unshifted, shift_y, inward_sign, left_obj, right_obj, thickne
     safe_cut(f"{label} seam slot on {right_obj.name}", right_obj, slot_cutter, primary='EXACT')
     bpy.data.objects.remove(slot_cutter, do_unlink=True)
 
+
 for obj in quadrant_objs:
     obj.data.update()
 bpy.context.view_layer.update()
@@ -1896,6 +2240,7 @@ print(f"\n  {'Label':<6} {'P_start':<22} {'P_end':<22} {'Len':>7}  Tiles")
 for _label, _p_start, _p_end, _length, _owner_tags in WALL_SEGMENT_INFO:
     print(f"  {_label:<6} ({_p_start[0]:8.3f},{_p_start[1]:8.3f})   "
           f"({_p_end[0]:8.3f},{_p_end[1]:8.3f})   {_length:7.2f}  {','.join(_owner_tags)}")
+
 print(f"  Placed {len(WALL_SEGMENT_INFO)} wall-segment labels")
 print("=" * 60)
 
@@ -1918,3 +2263,4 @@ print(f"Invisible tile gap: {INVISIBLE_TILE_GAP:.1f} tiles = {GAP_BETWEEN_PLATES
 print(f"Row split margin: {ROW_SPLIT_MARGIN:.1f}mm each side ({2*ROW_SPLIT_MARGIN:.1f}mm total gap)")
 print(f"Wire hole diameter: {WIRE_HOLE_DIAMETER:.1f}mm")
 print("="*60)
+
