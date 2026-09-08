@@ -612,6 +612,37 @@ def make_hex_pocket_cutter(name, y_center, z_center, across_flats, length=2000.0
     obj.location=Vector((0.0, y_center, z_center))
     return obj
 
+def _extrude_profile_along_z(bm, profile_xy, z0, z1):
+    """Extrudes a closed 2D profile (list of (x,y) points, in order) along
+    Z from z0 to z1 into a closed solid prism. Unlike
+    _extrude_profile_along_y (defined further below, for the L/R rail
+    tabs), winding here doesn't need to be hand-verified per face: the
+    W2/W3 fit-boss profile this builds is convex, so recalc_face_normals'
+    flood-fill reliably finds the true outward orientation regardless of
+    which way these faces wind -- same reasoning make_hex_pocket_cutter
+    above already relies on for its own convex prism."""
+    bottom = [bm.verts.new((x, y, z0)) for x, y in profile_xy]
+    top = [bm.verts.new((x, y, z1)) for x, y in profile_xy]
+    n = len(profile_xy)
+    for i in range(n):
+        j = (i + 1) % n
+        bm.faces.new([bottom[i], bottom[j], top[j], top[i]])
+    bm.faces.new(bottom)
+    bm.faces.new(list(reversed(top)))
+
+def make_profile_cutter_z(name, profile_xy, z0, z1):
+    mesh = bpy.data.meshes.new(name + "_mesh")
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    bm = bmesh.new()
+    _extrude_profile_along_z(bm, profile_xy, z0, z1)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bm.normal_update()
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.validate()
+    return obj
+
 def make_rod_hole_cutter_y(name, x_center, z_center, length=2000.0):
     print(f"    Rod hole at X={x_center:.3f}, Z={z_center:.3f} (⌀{ROD_HOLE_DIAMETER:.1f}mm, along Y)")
 
@@ -1202,6 +1233,360 @@ nut_seat_cutter.location.x = _w3_center_x
 apply_transforms(nut_seat_cutter)
 safe_cut("W3 nut-trap pocket on SensorBase_BL", bl_obj, nut_seat_cutter, primary='EXACT')
 bpy.data.objects.remove(nut_seat_cutter, do_unlink=True)
+
+# ============================================================
+# W2/W3 vertical fit boss -- a trapezoidal peg on SensorBase_TL,
+# protruding from W2's own wall-outer face at its midpoint, that
+# plugs into a matching socket cut into BL's W2/W3 corner-fill wedge
+# (the "A->C side" face merge_corner_fill_into_bl built directly
+# across the print gap from W2 -- tagged "toward W2 / TL" in that
+# function's own face-candidate comment, and already fused into one
+# solid with W3 there). Registers TL against BL at this seam, same
+# purpose the top/bottom rail fit-tabs serve for TL/TR and BL/BR.
+#
+# Protrusion direction is world -Y specifically, not W2's own
+# (diagonal) outward normal: Y is the ONLY real separation between
+# the TL and BL prints (a rigid +-ROW_SPLIT_MARGIN shift, 6mm total,
+# closed by the same-axis nudge at the very end of this script), so a
+# straight -Y push is exactly the physical assembly motion. The
+# trapezoid's "width" axis runs along W2's own tangent (A2->C
+# direction) instead -- checked numerically (standalone probe outside
+# Blender, same miter-offset math as GLOBAL_WALL_OFFSET) that a pure
+# -Y probe from W2's midpoint stays inside BL's wedge triangle to
+# well past 20mm depth, and that neither wire holes (L02 west hole at
+# X=-196, Y=+39 -- 39mm+ away in Y) nor the X-axis rod tunnels/canals
+# (all at Y<=-56 or Y>=+56 here) come anywhere near this X=-198
+# region, so this is safe to cut before any of those.
+#
+# Unlike the rail tabs (a horizontal cantilever off a FLAT rail,
+# needing a 45-degree Z-ramp to print without support), this boss
+# spans the wall's FULL height, Z=0..PLATE_H+WALL_HEIGHT (46mm) --
+# constant cross-section the whole way, starting right at the print
+# bed, so every layer is fully backed by the layer below it from the
+# very first one. No ramp needed; the taper instead lives in the X-Y
+# plan view (wide where it's rooted in the wall, narrower at the tip)
+# for a keyed, self-centering fit as it's pushed straight in along Y.
+# ============================================================
+print(f"\n{'='*60}")
+print("Adding W2/W3 vertical fit boss (TL boss / BL socket)")
+print(f"{'='*60}")
+
+FIT_BOSS_WIDTH_BASE = 15.0    # trapezoid width (along W2's own tangent), at
+                                # the end rooted inside TL's existing wall --
+                                # per your ask (15mm wide x 6mm deep)
+FIT_BOSS_WIDTH_TIP = 7.5      # trapezoid width at the tip (deepest into BL) --
+                                # kept at half the base width, same taper
+                                # ratio as the original 14/7mm design
+FIT_BOSS_DEPTH = 6.0          # -Y protrusion from TL's own W2 wall-outer face
+FIT_BOSS_ROOT_OVERLAP = 5.0   # the wide end extends this far the OTHER way
+                                # (+Y, back into TL's existing wall) past the
+                                # wall face -- a genuine volumetric overlap
+                                # for the union to resolve, same reasoning as
+                                # TAB_UNION_OVERLAP_X. Confirmed (standalone
+                                # probe) a pure +Y push of this size still
+                                # lands inside the wall's own 6mm thickness
+                                # here, not through its inner face. Raised
+                                # from 3.0 to 5.0 to push the boss's wide
+                                # root end further back into TL's wall so
+                                # the union's material fully covers/flushes
+                                # with the socket's mouth opening on the BL
+                                # side, closing a visible triangular sliver
+                                # at the seam.
+FIT_SOCKET_CLEARANCE = 0.15   # per-side clearance, ~0.3mm total gap -- 0.25
+                                # (0.5mm total) measured correct per
+                                # breakpoint diagnostic but read visually
+                                # oversized; 0.15 is a tighter friction-fit
+                                # starting point, tune printer-side if
+                                # needed.
+FIT_SOCKET_EXTRA_DEPTH = 0.2  # socket cut this much deeper than the boss's
+                                # own travel, so the tip never bottoms out --
+                                # lowered from 2.0: ruler-measured in Blender
+                                # at ~2.06mm, confirming this margin (not a
+                                # defect) was the visible gap past the boss's
+                                # tip; 0.5 shrinks it while still leaving
+                                # room so the tip doesn't bottom out.
+FIT_SOCKET_OPEN_MARGIN = 0.0  # lowered from 0.15 -- the socket's mouth
+                                 # should open exactly at the wall face,
+                                 # not past it, so there's no visible
+                                 # cavity edge beyond where the boss's
+                                 # root actually sits.
+FIT_Z_OVERSHOOT = 2.0   # the boss/socket cap faces would otherwise land
+                          # EXACTLY on the wall's own existing Z=0/Z=46
+                          # faces -- confirmed in-engine (isolated test
+                          # against duplicates of TL/BL): that produced 10
+                          # non-manifold edges on EACH side, every one of
+                          # them sitting exactly at Z=0.000 or Z=46.000, the
+                          # same duplicate-coincident-face problem
+                          # merge_rail_into_wall's own comment describes.
+                          # Overshooting past both ends instead (never
+                          # landing exactly ON a real boundary) is the same
+                          # fix already used everywhere else in this file
+                          # (TAB_UNION_OVERLAP_X, NUT_SEAT_OUTSIDE_MARGIN).
+                          # 0.5mm was enough for the original pure-Y-depth
+                          # design; once the profile was rotated below (depth
+                          # along the wall's true normal instead of Y), the
+                          # boss's leg edges cross the wall's own Z=0/Z=46
+                          # boundary at a shallower angle and 0.5mm started
+                          # producing 23 non-manifold edges again (all at the
+                          # overshoot planes) -- 2.0mm re-tested clean (0
+                          # non-manifold, 0 zero-area, 0 self-intersections).
+
+_FIT_A2r = (-210.0, 12.124)   # same W1/W2 raw corner merge_corner_fill_into_bl
+_FIT_Cr  = (-168.0, -12.124)  # uses locally -- redeclared here at module scope
+_fit_pa = GLOBAL_WALL_OFFSET.get(_vkey(_FIT_A2r), _FIT_A2r)
+_fit_pc = GLOBAL_WALL_OFFSET.get(_vkey(_FIT_Cr), _FIT_Cr)
+
+def _fit_trapezoid_profile(cx, cy, tx, ty, nx, ny, width_top, width_bottom, depth_top, depth_bottom):
+    """(cx,cy) is the wall-face midpoint; (tx,ty) the wall's own unit
+    tangent (width axis -- keeps the base/tip edges parallel to the wall);
+    (nx,ny) the wall's own true outward normal (depth axis -- keeps the
+    peg's own base->tip axis perpendicular to the wall). Was pure world -Y
+    for depth originally; W2 is a diagonal wall so that put the tip ~30deg
+    off true perpendicular -- corrected per your review of the in-engine
+    result (confirmed algebraically after the fix: root/tip edges both
+    exactly parallel to the tangent, offset exactly depth_top/depth_bottom
+    along the normal from (cx,cy))."""
+    top_l = (cx - tx*width_top/2.0    + nx*depth_top,    cy - ty*width_top/2.0    + ny*depth_top)
+    top_r = (cx + tx*width_top/2.0    + nx*depth_top,    cy + ty*width_top/2.0    + ny*depth_top)
+    bot_r = (cx + tx*width_bottom/2.0 + nx*depth_bottom, cy + ty*width_bottom/2.0 + ny*depth_bottom)
+    bot_l = (cx - tx*width_bottom/2.0 + nx*depth_bottom, cy - ty*width_bottom/2.0 + ny*depth_bottom)
+    return [top_l, top_r, bot_r, bot_l]
+
+def _fit_wall_frame(pa, pc, shift_y):
+    pa_s = (pa[0], pa[1] + shift_y)
+    pc_s = (pc[0], pc[1] + shift_y)
+    mx, my = (pa_s[0] + pc_s[0]) / 2.0, (pa_s[1] + pc_s[1]) / 2.0
+    dx, dy = pc_s[0] - pa_s[0], pc_s[1] - pa_s[1]
+    L = math.hypot(dx, dy)
+    tx, ty = dx / L, dy / L
+    nx, ny = ty, -tx   # true outward normal (rotate tangent -90deg) -- same
+                        # outward_normal() convention used throughout this
+                        # file (compute_boundary_offset_map etc.)
+    return mx, my, tx, ty, nx, ny
+
+def _fit_profile_from_local(local_pts, cx, cy, tx, ty, nx, ny):
+    """Transforms a list of (u,v) points -- u measured along the wall's own
+    tangent, v along its true outward normal -- into world XY at the given
+    wall-frame origin (cx,cy). Lets the exact same local shape be
+    instantiated at either TL's or BL's own frame origin just by swapping
+    which (cx,cy) is passed in."""
+    return [(cx + tx*u + nx*v, cy + ty*u + ny*v) for (u, v) in local_pts]
+
+def _offset_boss_profile(width_top, width_bottom, depth_top, depth_bottom,
+                          new_depth_top, new_depth_bottom, clearance):
+    """Builds the SOCKET's own local (u,v) profile from the boss's own
+    defining taper -- replaces the old approach of independently sizing the
+    socket trapezoid with WIDTH_TIP/WIDTH_BASE evaluated at unrelated depths
+    (FIT_SOCKET_OPEN_MARGIN / FIT_BOSS_DEPTH+FIT_SOCKET_EXTRA_DEPTH), which
+    reused the boss's own width LABELS at depths the boss's real taper never
+    actually reaches those widths at.
+
+    A single straight edge from new_depth_top to new_depth_bottom only
+    tracks the boss's real (clamped) taper AT those two endpoints -- at any
+    depth strictly between them it can be too wide or too narrow, unless
+    the boss's own taper bend (depth_top/depth_bottom, wherever the flat
+    clamp region starts) also gets its own vertex when it falls inside the
+    socket's depth span. So this builds an N-gon from ALL relevant depth
+    breakpoints (the socket's own start/end depths, plus any boss bend
+    strictly between them), evaluating the boss's own linear taper at each
+    one, before applying the same uniform mitered clearance offset as
+    before (bisector of the two adjacent edge normals, scaled by 1/cos_half
+    so the offset is a true perpendicular distance from each real edge, not
+    just a per-vertex push) -- unchanged, just generalized from a fixed
+    quad to however many points the breakpoints produce."""
+    def width_at(v):
+        v_clamped = max(min(v, depth_bottom), depth_top)
+        t = (v_clamped - depth_top) / (depth_bottom - depth_top)
+        return width_top + (width_bottom - width_top) * t
+
+    # Breakpoints: the socket's own start/end depths, PLUS any boss-taper
+    # bend (depth_top, depth_bottom) that falls strictly inside the
+    # socket's own depth span. Needed because a single straight edge
+    # from new_depth_top to new_depth_bottom doesn't track the boss's
+    # real bent profile at any depth between them -- it can be too wide
+    # or too narrow at every intermediate depth except the two ends,
+    # regardless of clamping the endpoint values alone.
+    ascending = new_depth_top <= new_depth_bottom
+    lo, hi = (new_depth_top, new_depth_bottom) if ascending else (new_depth_bottom, new_depth_top)
+    candidate_vs = {new_depth_top, new_depth_bottom}
+    for bend_v in (depth_top, depth_bottom):
+        if lo < bend_v < hi:
+            candidate_vs.add(bend_v)
+    ordered_vs = sorted(candidate_vs) if ascending else sorted(candidate_vs, reverse=True)
+
+    right_pts = [(width_at(v) / 2.0, v) for v in ordered_vs]
+    left_pts = [(-w, v) for (w, v) in reversed(right_pts)]
+    raw = right_pts + left_pts
+
+    n = len(raw)
+    ccx = sum(p[0] for p in raw) / n
+    ccy = sum(p[1] for p in raw) / n
+
+    def outward_edge_normal(p0, p1):
+        # Picks whichever of the two perpendiculars to edge p0->p1 points
+        # away from the polygon's own centroid -- robust to winding order,
+        # unlike a fixed-sign (dy/L,-dx/L) formula.
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        L = math.hypot(dx, dy)
+        if L < 1e-9:
+            return (0.0, 1.0)
+        cand = [(dy / L, -dx / L), (-dy / L, dx / L)]
+        mid = ((p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0)
+        return max(cand, key=lambda c: (mid[0] + c[0] - ccx)**2 + (mid[1] + c[1] - ccy)**2)
+
+    offset = []
+    for i in range(n):
+        prev_p, cur_p, next_p = raw[i - 1], raw[i], raw[(i + 1) % n]
+        n_in = outward_edge_normal(prev_p, cur_p)
+        n_out = outward_edge_normal(cur_p, next_p)
+        mx, my = n_in[0] + n_out[0], n_in[1] + n_out[1]
+        mlen = math.hypot(mx, my)
+        if mlen < 1e-9:
+            mx, my = n_in
+        else:
+            mx, my = mx / mlen, my / mlen
+        cos_half = max(mx * n_in[0] + my * n_in[1], 0.35)
+        d = clearance / cos_half
+        offset.append((cur_p[0] + mx * d, cur_p[1] + my * d))
+    return offset
+
+_fit_mx_tl, _fit_my_tl, _fit_tx, _fit_ty, _fit_nx, _fit_ny = _fit_wall_frame(_fit_pa, _fit_pc, ROW_SPLIT_MARGIN)
+_fit_mx_bl, _fit_my_bl, _, _, _, _ = _fit_wall_frame(_fit_pa, _fit_pc, -ROW_SPLIT_MARGIN)
+print(f"  W2 midpoint (TL frame): ({_fit_mx_tl:.3f},{_fit_my_tl:.3f}), "
+      f"tangent=({_fit_tx:.3f},{_fit_ty:.3f}), normal=({_fit_nx:.3f},{_fit_ny:.3f})")
+print(f"  Matching wedge point (BL frame): ({_fit_mx_bl:.3f},{_fit_my_bl:.3f})")
+
+# Taper reversed per your ask: width_top/width_bottom swapped so the ROOT
+# end (depth_top, embedded in TL's wall) is now the NARROW (WIDTH_TIP) end
+# and the outward TIP end (depth_bottom, protruding into BL) is now the
+# WIDE (WIDTH_BASE) end -- names no longer match which end they size, but
+# left as-is rather than renaming the constants themselves. Depth axis
+# (tangent/normal) and FIT_Z_OVERSHOOT are untouched.
+FIT_BOSS_PROFILE = _fit_trapezoid_profile(
+    _fit_mx_tl, _fit_my_tl, _fit_tx, _fit_ty, _fit_nx, _fit_ny,
+    FIT_BOSS_WIDTH_TIP, FIT_BOSS_WIDTH_BASE,
+    -FIT_BOSS_ROOT_OVERLAP, FIT_BOSS_DEPTH)
+
+print(f"  Boss root corners (world): {FIT_BOSS_PROFILE[0]}, {FIT_BOSS_PROFILE[1]}")
+print(f"  Nearest wall corner C (TL frame): ({_fit_pc[0]}, {_fit_pc[1] + ROW_SPLIT_MARGIN})")
+import math as _m
+for root_corner in (FIT_BOSS_PROFILE[0], FIT_BOSS_PROFILE[1]):
+    wall_c = (_fit_pc[0], _fit_pc[1] + ROW_SPLIT_MARGIN)
+    dist = _m.hypot(root_corner[0] - wall_c[0], root_corner[1] - wall_c[1])
+    print(f"    root corner {root_corner} -> wall corner C: distance = {dist:.3f}mm")
+
+boss_cutter = make_profile_cutter_z("Hole_W2W3Boss", FIT_BOSS_PROFILE,
+                                     -FIT_Z_OVERSHOOT, PLATE_H + WALL_HEIGHT + FIT_Z_OVERSHOOT)
+safe_cut("W2/W3 fit boss on SensorBase_TL", tl_obj, boss_cutter, primary='EXACT', operation='UNION')
+bpy.data.objects.remove(boss_cutter, do_unlink=True)
+
+# ---- Trim the boss's Z-overshoot back off -- FIT_Z_OVERSHOOT was only
+# ever needed to avoid the duplicate-coincident-face problem AT UNION TIME
+# (see FIT_Z_OVERSHOOT's own comment above); now that the union has fully
+# merged the boss into one continuous solid with the wall, that internal
+# Z=0/Z=46 seam no longer exists within the boss's own footprint, so a trim
+# cutter confined to just that footprint (not a huge global rectangle,
+# which WOULD still coincide with the surrounding wall's own real, still-
+# separate Z=0/Z=46 floor/roof faces just outside the boss) can cut exactly
+# at Z=0 and Z=PLATE_H+WALL_HEIGHT cleanly.
+# obj.bound_box lags behind a mesh-datablock swap (safe_cut's own
+# `target.data = dup.data` on success) until the dependency graph is
+# refreshed -- confirmed in-engine: without this update() call, the
+# "before" print here showed the PRE-union bbox and the "after" print
+# (below) showed the PRE-trim bbox, each one full boolean op stale.
+tl_obj.data.update()
+bpy.context.view_layer.update()
+_tl_bbox_before = [tl_obj.matrix_world @ Vector(c) for c in tl_obj.bound_box]
+_tl_z_before = [v.z for v in _tl_bbox_before]
+print(f"  SensorBase_TL bbox Z BEFORE overshoot trim: {min(_tl_z_before):.3f}..{max(_tl_z_before):.3f}")
+
+_TRIM_MARGIN = 2.0   # local footprint margin beyond the boss's own widest
+                       # extent, so the trim cutter fully covers the boss's
+                       # footprint (including the mitered corners) without
+                       # reaching out into the surrounding plain wall
+_trim_u_max = max(FIT_BOSS_WIDTH_TIP, FIT_BOSS_WIDTH_BASE) / 2.0 + _TRIM_MARGIN
+_trim_v_min = -FIT_BOSS_ROOT_OVERLAP - _TRIM_MARGIN
+_trim_v_max = FIT_BOSS_DEPTH + _TRIM_MARGIN
+_TRIM_LOCAL = [(-_trim_u_max, _trim_v_min), (_trim_u_max, _trim_v_min),
+               (_trim_u_max, _trim_v_max), (-_trim_u_max, _trim_v_max)]
+_TRIM_WORLD = _fit_profile_from_local(_TRIM_LOCAL, _fit_mx_tl, _fit_my_tl, _fit_tx, _fit_ty, _fit_nx, _fit_ny)
+
+bottom_trim = make_profile_cutter_z("Hole_W2W3BossTrimBottom", _TRIM_WORLD,
+                                     -FIT_Z_OVERSHOOT - 1.0, 0.0)
+safe_cut("W2/W3 boss bottom overshoot trim on SensorBase_TL", tl_obj, bottom_trim, primary='EXACT')
+bpy.data.objects.remove(bottom_trim, do_unlink=True)
+
+top_trim = make_profile_cutter_z("Hole_W2W3BossTrimTop", _TRIM_WORLD,
+                                  PLATE_H + WALL_HEIGHT, PLATE_H + WALL_HEIGHT + FIT_Z_OVERSHOOT + 1.0)
+safe_cut("W2/W3 boss top overshoot trim on SensorBase_TL", tl_obj, top_trim, primary='EXACT')
+bpy.data.objects.remove(top_trim, do_unlink=True)
+
+tl_obj.data.update()
+bpy.context.view_layer.update()
+_tl_bbox_after = [tl_obj.matrix_world @ Vector(c) for c in tl_obj.bound_box]
+_tl_z_after = [v.z for v in _tl_bbox_after]
+print(f"  SensorBase_TL bbox Z AFTER overshoot trim: {min(_tl_z_after):.3f}..{max(_tl_z_after):.3f}")
+
+# Socket taper is now derived from the boss's OWN taper (see
+# _offset_boss_profile's docstring) instead of independently re-sizing a
+# trapezoid with WIDTH_TIP/WIDTH_BASE evaluated at unrelated depths -- the
+# old version reused those width LABELS at FIT_SOCKET_OPEN_MARGIN /
+# FIT_BOSS_DEPTH+FIT_SOCKET_EXTRA_DEPTH, depths the boss's own taper never
+# actually reaches those exact widths at, so the socket's real cross-
+# section didn't consistently key to the boss's actual shape.
+FIT_SOCKET_LOCAL = _offset_boss_profile(
+    FIT_BOSS_WIDTH_TIP, FIT_BOSS_WIDTH_BASE,
+    -FIT_BOSS_ROOT_OVERLAP, FIT_BOSS_DEPTH,
+    -FIT_SOCKET_OPEN_MARGIN, FIT_BOSS_DEPTH + FIT_SOCKET_EXTRA_DEPTH,
+    FIT_SOCKET_CLEARANCE)
+print(f"  FIT_SOCKET_LOCAL has {len(FIT_SOCKET_LOCAL)} points "
+      f"(expect 6: boss taper bend at depth_bottom={FIT_BOSS_DEPTH} falls strictly "
+      f"inside the socket's own -{FIT_SOCKET_OPEN_MARGIN}..{FIT_BOSS_DEPTH + FIT_SOCKET_EXTRA_DEPTH} span)")
+
+print("  Boss vs socket half-width comparison at each breakpoint:")
+for v in sorted({-FIT_BOSS_ROOT_OVERLAP, FIT_BOSS_DEPTH, -FIT_SOCKET_OPEN_MARGIN, FIT_BOSS_DEPTH + FIT_SOCKET_EXTRA_DEPTH}):
+    v_clamped = max(min(v, FIT_BOSS_DEPTH), -FIT_BOSS_ROOT_OVERLAP)
+    t = (v_clamped - (-FIT_BOSS_ROOT_OVERLAP)) / (FIT_BOSS_DEPTH - (-FIT_BOSS_ROOT_OVERLAP))
+    boss_half_width = (FIT_BOSS_WIDTH_TIP + (FIT_BOSS_WIDTH_BASE - FIT_BOSS_WIDTH_TIP) * t) / 2.0
+    # Find the socket's actual half-width at this same v by nearest local point
+    # Widened from 0.01: the mitered offset shifts each point's v away from
+    # the nominal breakpoint (confirmed -- actual v's were -1.25, 5.95, 8.25
+    # against nominal -1, 6, 8), so a tight 0.01 tolerance never matched
+    # anything. 2.0 comfortably covers the miter's own shift (~0.25mm seen
+    # so far) while still narrow enough not to accidentally match an
+    # unrelated point.
+    socket_pts_at_v = [pt for pt in FIT_SOCKET_LOCAL if abs(pt[1] - v) < 2.0]
+    if socket_pts_at_v:
+        socket_half_width = max(abs(pt[0]) for pt in socket_pts_at_v)
+        gap = socket_half_width - boss_half_width
+        print(f"    v={v:6.2f}: boss half-width={boss_half_width:.3f}mm, "
+              f"socket half-width={socket_half_width:.3f}mm, per-side gap={gap:.3f}mm")
+
+FIT_SOCKET_PROFILE = _fit_profile_from_local(FIT_SOCKET_LOCAL, _fit_mx_bl, _fit_my_bl, _fit_tx, _fit_ty, _fit_nx, _fit_ny)
+
+print('FIT_BOSS_PROFILE (world):', FIT_BOSS_PROFILE)
+print('FIT_SOCKET_PROFILE (world):', FIT_SOCKET_PROFILE)
+print(f'FIT_BOSS_ROOT_OVERLAP={FIT_BOSS_ROOT_OVERLAP}, FIT_SOCKET_OPEN_MARGIN={FIT_SOCKET_OPEN_MARGIN}')
+
+socket_cutter = make_profile_cutter_z("Hole_W2W3Socket", FIT_SOCKET_PROFILE,
+                                       -FIT_Z_OVERSHOOT, PLATE_H + WALL_HEIGHT + FIT_Z_OVERSHOOT)
+safe_cut("W2/W3 fit socket on SensorBase_BL", bl_obj, socket_cutter, primary='EXACT')
+bpy.data.objects.remove(socket_cutter, do_unlink=True)
+
+# Object-transform check -- confirms whether a viewport look/screenshot
+# taken right HERE (immediately after the boss/socket feature is built)
+# would show the real assembled fit or the still-separated, pre-nudge
+# print layout. cleanup_objects() deletes and recreates tl_obj/bl_obj
+# fresh at the very start of THIS run, and nothing sets their
+# object.location until the "assembled view" nudge block runs, which is
+# near the very end of the script (after export) -- so at this point in
+# the pipeline both should still be at Blender's default (0,0,0).
+print(f"  tl_obj.location: {tuple(tl_obj.location)}")
+print(f"  bl_obj.location: {tuple(bl_obj.location)}")
+print(f"  Y difference (tl_obj.location.y - bl_obj.location.y): "
+      f"{tl_obj.location.y - bl_obj.location.y:.3f}mm")
+print(f"  FIT_BOSS_DEPTH={FIT_BOSS_DEPTH}, 2*ROW_SPLIT_MARGIN={2*ROW_SPLIT_MARGIN}, "
+      f"match={FIT_BOSS_DEPTH == 2*ROW_SPLIT_MARGIN}")
 
 # ---- X-axis threaded-rod holes (unite the 4 quadrants) — UNCHANGED,
 # same positions, same order as before ----
@@ -1980,6 +2365,10 @@ bpy.context.view_layer.update()
 for area in bpy.context.screen.areas:
     if area.type == 'VIEW_3D':
         area.tag_redraw()
+
+print(f"  [POST-NUDGE] tl_obj.location: {tuple(tl_obj.location)}")
+print(f"  [POST-NUDGE] bl_obj.location: {tuple(bl_obj.location)}")
+print(f"  [POST-NUDGE] Y difference: {tl_obj.location.y - bl_obj.location.y:.3f}mm")
 
 # ---- Wall-segment labeling (W1, W2, ...) -- generalizes the earlier
 # W1-only approach into a full boundary-trace walk. Purely additive/
