@@ -1330,6 +1330,13 @@ FIT_Z_OVERSHOOT = 2.0   # the boss/socket cap faces would otherwise land
                           # producing 23 non-manifold edges again (all at the
                           # overshoot planes) -- 2.0mm re-tested clean (0
                           # non-manifold, 0 zero-area, 0 self-intersections).
+FIT_U_OFFSET = 10.0   # shifts the boss/socket feature 10mm along the
+                        # wall's own tangent direction -- toward C/east
+                        # this time (the opposite sign from the earlier
+                        # west/A2 attempt, which visually landed on the
+                        # wrong side and was rolled back). Positive since
+                        # the tangent (0.866,-0.500) points toward C, so
+                        # positive moves toward C/east.
 
 _FIT_A2r = (-210.0, 12.124)   # same W1/W2 raw corner merge_corner_fill_into_bl
 _FIT_Cr  = (-168.0, -12.124)  # uses locally -- redeclared here at module scope
@@ -1452,6 +1459,10 @@ def _offset_boss_profile(width_top, width_bottom, depth_top, depth_bottom,
 
 _fit_mx_tl, _fit_my_tl, _fit_tx, _fit_ty, _fit_nx, _fit_ny = _fit_wall_frame(_fit_pa, _fit_pc, ROW_SPLIT_MARGIN)
 _fit_mx_bl, _fit_my_bl, _, _, _, _ = _fit_wall_frame(_fit_pa, _fit_pc, -ROW_SPLIT_MARGIN)
+_fit_mx_tl += _fit_tx * FIT_U_OFFSET
+_fit_my_tl += _fit_ty * FIT_U_OFFSET
+_fit_mx_bl += _fit_tx * FIT_U_OFFSET
+_fit_my_bl += _fit_ty * FIT_U_OFFSET
 print(f"  W2 midpoint (TL frame): ({_fit_mx_tl:.3f},{_fit_my_tl:.3f}), "
       f"tangent=({_fit_tx:.3f},{_fit_ty:.3f}), normal=({_fit_nx:.3f},{_fit_ny:.3f})")
 print(f"  Matching wedge point (BL frame): ({_fit_mx_bl:.3f},{_fit_my_bl:.3f})")
