@@ -75,6 +75,13 @@ WIRE_HOLE_DIAMETER = 12.0
 WIRE_HOLE_RADIUS = WIRE_HOLE_DIAMETER / 2.0
 WIRE_HOLE_ANGLE = 180
 
+# ---- REAR-SIDE LIGHTENING POCKET (one hex pocket per tile) ---------
+POCKET_HEX_WIDTH = 50.0   # flat-to-flat width of the hex pocket (parameterized
+                            # for density tuning)
+POCKET_DEPTH = 18.0       # cut from Z=0 to Z=POCKET_DEPTH
+POCKET_Z_START = 0.0
+POCKET_Z_END = POCKET_DEPTH
+
 # ---- THREADED ROD HOLES (unite the 4 quadrant plates) --------------
 ROD_HOLE_DIAMETER = 7.0
 ROD_HOLE_RADIUS = ROD_HOLE_DIAMETER / 2.0
@@ -643,6 +650,14 @@ def make_profile_cutter_z(name, profile_xy, z0, z1):
     mesh.validate()
     return obj
 
+def make_hex_pocket_cutter_z(name, cx, cy, flat_width, z0, z1):
+    """Hex prism cutter aligned with the tile grid's own hexagon
+    orientation (same 30+60*i corner convention as get_hex_corners),
+    centered at (cx, cy), extruded z0 to z1. Reuses
+    _extrude_profile_along_z the same way make_profile_cutter_z does."""
+    corners = get_hex_corners(cx, cy, flat_width)
+    return make_profile_cutter_z(name, corners, z0, z1)
+
 def make_rod_hole_cutter_y(name, x_center, z_center, length=2000.0):
     print(f"    Rod hole at X={x_center:.3f}, Z={z_center:.3f} (⌀{ROD_HOLE_DIAMETER:.1f}mm, along Y)")
 
@@ -988,6 +1003,41 @@ bl_obj = build_side(bl_tiles, "SensorBase_BL", shift_x=0.0, shift_y=-ROW_SPLIT_M
 br_obj = build_side(br_tiles, "SensorBase_BR", shift_x=GAP_BETWEEN_PLATES, shift_y=-ROW_SPLIT_MARGIN)
 
 quadrant_objs = [tl_obj, tr_obj, bl_obj, br_obj]
+
+# ============================================================
+# Rear-side hex lightening pockets -- one pocket per tile, cut against
+# uniform, unmodified walls before any of the fragile custom
+# corner/rail/boss geometry gets added on top (same reasoning as the
+# wire holes above).
+print(f"\n{'='*60}")
+print(f"Cutting rear-side hex lightening pockets ({POCKET_HEX_WIDTH:.1f}mm wide, "
+      f"Z={POCKET_Z_START:.1f}..{POCKET_Z_END:.1f}mm)")
+print(f"{'='*60}")
+
+POCKET_VOL_BEFORE = {obj.name: mesh_volume(obj) for obj in quadrant_objs}
+
+POCKET_TILE_GROUPS = [
+    (tl_tiles, tl_obj), (tr_tiles, tr_obj),
+    (bl_tiles, bl_obj), (br_tiles, br_obj),
+]
+for tiles, obj in POCKET_TILE_GROUPS:
+    for tag, cx, cy in tiles:
+        print(f"\n  {tag} pocket at ({cx:.3f}, {cy:.3f})...")
+        cutter = make_hex_pocket_cutter_z(f"Hole_Pocket_{tag}", cx, cy,
+                                           POCKET_HEX_WIDTH, POCKET_Z_START, POCKET_Z_END)
+        safe_cut(f"{tag} hex pocket on {obj.name}", obj, cutter, primary='EXACT')
+        bpy.data.objects.remove(cutter, do_unlink=True)
+
+print(f"\n{'='*60}")
+print("Lightening pocket pass -- post-cut verification")
+print(f"{'='*60}")
+for obj in quadrant_objs:
+    nm, za = report_manifold_stats(obj)
+    si = report_self_intersections(obj)
+    vol_after = mesh_volume(obj)
+    vol_before = POCKET_VOL_BEFORE[obj.name]
+    print(f"  {obj.name}: non-manifold={nm}, zero-area={za}, self-intersections={si}, "
+          f"volume {vol_before:.1f} -> {vol_after:.1f} mm^3 (removed {vol_before - vol_after:.1f} mm^3)")
 
 # ============================================================
 # W2/W3 corner-bridging panel (Option A -- seamless, mitered
